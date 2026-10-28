@@ -1,0 +1,30 @@
+# Build output
+mac/.build/
+mac/.swiftpm/
+android/.gradle/
+android/build/
+android/app/build/
+android/.idea/
+android/.kotlin/
+*.iml
+
+# Built apps (share them as GitHub Releases instead, if ever)
+dist/
+*.apk
+*.aab
+*.dmg
+*.app/
+
+# Machine-specific and private: SDK path, signing keys, settings, logs
+local.properties
+*.jks
+*.keystore
+*.p12
+*.pem
+*.mobileprovision
+.env
+config.json
+*.log
+
+# macOS
+.DS_Store

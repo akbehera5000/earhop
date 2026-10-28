@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Expanded notification: status, battery bars, noise control (Galaxy Buds on this device), Take or Release, Auto. -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical">
+    <TextView android:id="@+id/n_title" android:layout_width="wrap_content" android:layout_height="wrap_content"
+        android:textAppearance="@android:style/TextAppearance.Material.Notification.Title" android:maxLines="1" android:ellipsize="end" />
+    <TextView android:id="@+id/n_sub" android:layout_width="wrap_content" android:layout_height="wrap_content"
+        android:textAppearance="@android:style/TextAppearance.Material.Notification" android:maxLines="2" android:ellipsize="end" />
+    <LinearLayout android:id="@+id/n_bars" android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:layout_marginTop="10dp" android:orientation="horizontal">
+        <LinearLayout android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:orientation="vertical">
+            <TextView android:id="@+id/n_b0" android:layout_width="wrap_content" android:layout_height="wrap_content"
+                android:text="Left" android:textAppearance="@android:style/TextAppearance.Material.Notification.Info" />
+            <ProgressBar android:id="@+id/n_p0" style="@android:style/Widget.Material.ProgressBar.Horizontal"
+                android:layout_width="match_parent" android:layout_height="6dp" android:layout_marginTop="3dp"
+                android:max="100" android:progressDrawable="@drawable/notif_bar" />
+        </LinearLayout>
+        <LinearLayout android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:orientation="vertical" android:layout_marginStart="10dp">
+            <TextView android:id="@+id/n_b1" android:layout_width="wrap_content" android:layout_height="wrap_content"
+                android:text="Right" android:textAppearance="@android:style/TextAppearance.Material.Notification.Info" />
+            <ProgressBar android:id="@+id/n_p1" style="@android:style/Widget.Material.ProgressBar.Horizontal"
+                android:layout_width="match_parent" android:layout_height="6dp" android:layout_marginTop="3dp"
+                android:max="100" android:progressDrawable="@drawable/notif_bar" />
+        </LinearLayout>
+        <LinearLayout android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:orientation="vertical" android:layout_marginStart="10dp">
+            <TextView android:id="@+id/n_b2" android:layout_width="wrap_content" android:layout_height="wrap_content"
+                android:text="Case" android:textAppearance="@android:style/TextAppearance.Material.Notification.Info" />
+            <ProgressBar android:id="@+id/n_p2" style="@android:style/Widget.Material.ProgressBar.Horizontal"
+                android:layout_width="match_parent" android:layout_height="6dp" android:layout_marginTop="3dp"
+                android:max="100" android:progressDrawable="@drawable/notif_bar" />
+        </LinearLayout>
+    </LinearLayout>
+    <LinearLayout android:id="@+id/n_noise" android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:layout_marginTop="10dp" android:orientation="horizontal">
+        <TextView android:id="@+id/n_off" android:layout_width="0dp" android:layout_height="34dp" android:layout_weight="1"
+            android:layout_marginEnd="6dp" android:gravity="center" android:text="Off" android:textSize="13sp" android:textStyle="bold"
+            android:background="@drawable/notif_pill_off" android:textAppearance="@android:style/TextAppearance.Material.Notification" />
+        <TextView android:id="@+id/n_anc" android:layout_width="0dp" android:layout_height="34dp" android:layout_weight="1"
+            android:layout_marginEnd="6dp" android:gravity="center" android:text="Noise cancelling" android:textSize="13sp" android:textStyle="bold"
+            android:background="@drawable/notif_pill_off" android:textAppearance="@android:style/TextAppearance.Material.Notification" />
+        <TextView android:id="@+id/n_amb" android:layout_width="0dp" android:layout_height="34dp" android:layout_weight="1"
+            android:layout_marginEnd="6dp" android:gravity="center" android:text="Ambient" android:textSize="13sp" android:textStyle="bold"
+            android:background="@drawable/notif_pill_off" android:textAppearance="@android:style/TextAppearance.Material.Notification" />
+    </LinearLayout>
+    <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:layout_marginTop="8dp" android:orientation="horizontal">
+        <TextView android:id="@+id/n_take" android:layout_width="0dp" android:layout_height="34dp" android:layout_weight="1"
+            android:layout_marginEnd="6dp" android:gravity="center" android:text="Take" android:textSize="12sp" android:maxLines="1" android:ellipsize="end" android:textStyle="bold"
+            android:background="@drawable/notif_pill_off" android:textAppearance="@android:style/TextAppearance.Material.Notification" />
+        <TextView android:id="@+id/n_clip" android:layout_width="0dp" android:layout_height="34dp" android:layout_weight="1"
+            android:layout_marginEnd="6dp" android:gravity="center" android:text="Share clipboard" android:textSize="12sp" android:maxLines="1" android:ellipsize="end" android:textStyle="bold"
+            android:background="@drawable/notif_pill_off" android:textAppearance="@android:style/TextAppearance.Material.Notification" />
+        <TextView android:id="@+id/n_auto" android:layout_width="0dp" android:layout_height="34dp" android:layout_weight="1"
+            android:layout_marginEnd="6dp" android:gravity="center" android:text="Auto switch: On" android:textSize="12sp" android:maxLines="1" android:ellipsize="end" android:textStyle="bold"
+            android:background="@drawable/notif_pill_off" android:textAppearance="@android:style/TextAppearance.Material.Notification" />
+    </LinearLayout>
+</LinearLayout>

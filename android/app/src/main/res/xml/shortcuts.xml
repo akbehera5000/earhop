@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut
+        android:shortcutId="take"
+        android:enabled="true"
+        android:icon="@drawable/ic_tile_take"
+        android:shortcutShortLabel="@string/shortcut_take"
+        android:shortcutLongLabel="@string/shortcut_take_long">
+        <intent
+            android:action="com.earhop.logger.TAKE"
+            android:targetPackage="com.earhop.logger"
+            android:targetClass="com.earhop.logger.ActionActivity" />
+    </shortcut>
+    <shortcut
+        android:shortcutId="release"
+        android:enabled="true"
+        android:icon="@drawable/ic_tile_release"
+        android:shortcutShortLabel="@string/shortcut_release"
+        android:shortcutLongLabel="@string/shortcut_release_long">
+        <intent
+            android:action="com.earhop.logger.RELEASE"
+            android:targetPackage="com.earhop.logger"
+            android:targetClass="com.earhop.logger.ActionActivity" />
+    </shortcut>
+</shortcuts>

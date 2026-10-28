@@ -1,0 +1,5 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="48dp" android:height="48dp" android:viewportWidth="48" android:viewportHeight="48">
+    <!-- Two simple earbuds: a round head with a short stem each. -->
+    <path android:fillColor="#FFFFFFFF" android:pathData="M15,9a7,7 0,1 0,0.01 0zM12.5,20h5v15a2.5,2.5 0,0 1,-5 0z"/>
+    <path android:fillColor="#FFFFFFFF" android:pathData="M33,9a7,7 0,1 0,0.01 0zM30.5,20h5v15a2.5,2.5 0,0 1,-5 0z"/>
+</vector>
