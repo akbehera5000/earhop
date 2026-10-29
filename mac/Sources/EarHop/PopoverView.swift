@@ -47,13 +47,23 @@ struct PopoverView: View {
 
     // MARK: header
 
+    /// "auto", or a pair chosen by hand (which turns automatic detection off).
+    private var earbudsChoice: Binding<String> {
+        Binding(get: { state.cfg.earbudsMode == "auto" ? "auto" : state.cfg.earbuds }, set: { v in
+            var c = state.cfg
+            if v == "auto" { c.earbudsMode = "auto" } else { c.earbudsMode = "manual"; c.earbuds = v }
+            state.cfg = c
+        })
+    }
+
     private var header: some View {
         HStack(spacing: 10) {
-            Picker("Earbuds", selection: $state.cfg.earbuds) {
-                Text("AirPods Pro").tag("airpods"); Text("Galaxy Buds2 Pro").tag("buds")
+            Picker("Earbuds", selection: earbudsChoice) {
+                Text("Auto").tag("auto"); Text("AirPods").tag("airpods"); Text("Buds").tag("buds")
             }
             .pickerStyle(.segmented)
             .labelsHidden()
+            .help("Auto follows the earbuds in use: the pair connected to this Mac, or the pair the device holding them reports.")
             .accessibilityLabel("Active earbuds")
             Toggle("Live", isOn: $state.cfg.liveMode)
                 .toggleStyle(.switch)

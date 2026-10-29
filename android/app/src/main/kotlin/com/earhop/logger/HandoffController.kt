@@ -13,7 +13,8 @@ class HandoffController(
     private val ctx: Context,
     private val name: String,
     private val claimer: Claimer,
-    private val filter: String,
+    /** Name filter of the active earbuds; changes when the earbuds switch (automatic detection). */
+    @Volatile var filter: String,
     private val isOwner: () -> Boolean,
 ) {
     private val prefs = ctx.getSharedPreferences("earhop", Context.MODE_PRIVATE)

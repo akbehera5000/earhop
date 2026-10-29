@@ -13,13 +13,19 @@ struct Status {
     var ear: Ear
     var owner: Bool
     var call: Bool = false
+    /// Which earbuds this device uses: "airpods", "buds", or "" when unknown (v1, v2 and older Bluetooth LE packets).
+    var prof: String = ""
 }
 
 enum Proto {
-    /// v1 has no call field, v2 appends it.
+    /// v1 has no call field, v2 appends it, v3 also appends the earbud profile.
     static func canonical(_ s: Status, v: Int = 2) -> String {
         let base = "\(v)|\(s.dev)|\(s.ts)|\(s.seq)|\(s.playing ? 1 : 0)|\(s.ear.rawValue)|\(s.owner ? 1 : 0)"
-        return v == 1 ? base : base + "|\(s.call ? 1 : 0)"
+        switch v {
+        case 1: return base
+        case 2: return base + "|\(s.call ? 1 : 0)"
+        default: return base + "|\(s.call ? 1 : 0)|\(s.prof)"
+        }
     }
 
     static func signRaw(_ secret: String, _ data: Data) -> [UInt8] {
@@ -31,10 +37,10 @@ enum Proto {
     }
 
     static func encode(_ s: Status, secret: String) -> Data? {
-        let obj: [String: Any] = ["v": 2, "dev": s.dev, "ts": s.ts, "seq": s.seq,
+        let obj: [String: Any] = ["v": 3, "dev": s.dev, "ts": s.ts, "seq": s.seq,
                                   "playing": s.playing ? 1 : 0, "ear": s.ear.rawValue,
-                                  "owner": s.owner ? 1 : 0, "call": s.call ? 1 : 0,
-                                  "sig": sign(secret, canonical(s))]
+                                  "owner": s.owner ? 1 : 0, "call": s.call ? 1 : 0, "prof": s.prof,
+                                  "sig": sign(secret, canonical(s, v: 3))]
         return try? JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys])
     }
 
@@ -53,14 +59,15 @@ enum Proto {
         guard let v = o["v"] as? Int, let dev = o["dev"] as? String, let ts = (o["ts"] as? NSNumber)?.int64Value,
               let seq = o["seq"] as? Int, let playing = o["playing"] as? Int, let earRaw = o["ear"] as? String,
               let ear = Ear(rawValue: earRaw), let owner = o["owner"] as? Int, let sig = o["sig"] as? String else { return nil }
-        let call = v == 2 && (o["call"] as? Int) == 1
-        let s = Status(dev: dev, ts: ts, seq: seq, playing: playing == 1, ear: ear, owner: owner == 1, call: call)
+        let call = v >= 2 && (o["call"] as? Int) == 1
+        let prof = v == 3 ? (o["prof"] as? String ?? "") : ""
+        let s = Status(dev: dev, ts: ts, seq: seq, playing: playing == 1, ear: ear, owner: owner == 1, call: call, prof: prof)
         return sign(secret, canonical(s, v: v)) == sig
     }
 
     static func decode(_ data: Data, secret: String, nowMs: Int64) -> Status? {
         guard let o = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let v = o["v"] as? Int, v == 1 || v == 2,
+              let v = o["v"] as? Int, (1 ... 3).contains(v),
               let dev = o["dev"] as? String, !dev.contains("|"),
               let ts = (o["ts"] as? NSNumber)?.int64Value,
               let seq = o["seq"] as? Int,
@@ -69,11 +76,16 @@ enum Proto {
               let owner = o["owner"] as? Int,
               let sig = o["sig"] as? String else { return nil }
         var call = false
-        if v == 2 {
+        if v >= 2 {
             guard let c = o["call"] as? Int else { return nil }
             call = c == 1
         }
-        let s = Status(dev: dev, ts: ts, seq: seq, playing: playing == 1, ear: ear, owner: owner == 1, call: call)
+        var prof = ""
+        if v == 3 {
+            guard let p = o["prof"] as? String, ["", "airpods", "buds"].contains(p) else { return nil }
+            prof = p
+        }
+        let s = Status(dev: dev, ts: ts, seq: seq, playing: playing == 1, ear: ear, owner: owner == 1, call: call, prof: prof)
         let expected = Array(sign(secret, canonical(s, v: v)).utf8)
         let got = Array(sig.utf8)
         guard expected.count == got.count else { return nil }
@@ -89,7 +101,8 @@ enum Proto {
 /// Bluetooth LE fallback payload, 16 bytes carried as one 128-bit service UUID.
 /// [0]=0xEA [1]=dev code [2..3]=seq [4]=flags [5..12]=truncated HMAC of bytes 0..4 and 13..15
 /// [13..15]=minutes since 1970 (low 24 bits). The signed minute stamp refuses recordings older than 2 minutes.
-/// Flags: bit0 playing, bits1-2 ear (0 unknown 1 none 2 one 3 both), bit3 owner, bit4 call.
+/// Flags: bit0 playing, bits1-2 ear (0 unknown 1 none 2 one 3 both), bit3 owner, bit4 call, bit5 earbud profile known,
+/// bit6 profile is Galaxy Buds (else AirPods).
 enum BlePayload {
     static let devCodes: [String: UInt8] = ["mac": 0, "phone": 1, "tab": 2]
     static func earCode(_ e: Ear) -> UInt8 { switch e { case .unknown: return 0; case .none: return 1; case .one: return 2; case .both: return 3 } }
@@ -99,13 +112,14 @@ enum BlePayload {
 
     static func encode(_ s: Status, secret: String, minute m: Int = minute(Proto.nowMs())) -> [UInt8]? {
         guard let dev = devCodes[s.dev] else { return nil }
-        let flags = (s.playing ? 1 : 0) | (earCode(s.ear) << 1) | (s.owner ? 8 : 0) | (s.call ? 16 : 0)
+        let profBits: UInt8 = s.prof == "buds" ? 96 : s.prof == "airpods" ? 32 : 0
+        let flags = (s.playing ? 1 : 0) | (earCode(s.ear) << 1) | (s.owner ? 8 : 0) | (s.call ? 16 : 0) | profBits
         let head: [UInt8] = [0xEA, dev, UInt8((s.seq >> 8) & 0xFF), UInt8(s.seq & 0xFF), flags]
         let stamp: [UInt8] = [UInt8((m >> 16) & 0xFF), UInt8((m >> 8) & 0xFF), UInt8(m & 0xFF)]
         return head + Array(Proto.signRaw(secret, Data(head + stamp))[0 ..< 8]) + stamp
     }
 
-    static func decode(_ b: [UInt8], secret: String, nowMinute: Int = minute(Proto.nowMs())) -> (dev: String, seq: Int, playing: Bool, ear: Ear, owner: Bool, call: Bool)? {
+    static func decode(_ b: [UInt8], secret: String, nowMinute: Int = minute(Proto.nowMs())) -> (dev: String, seq: Int, playing: Bool, ear: Ear, owner: Bool, call: Bool, prof: String)? {
         guard b.count == 16, b[0] == 0xEA else { return nil }
         let mac = Array(Proto.signRaw(secret, Data(Array(b[0 ..< 5]) + Array(b[13 ..< 16])))[0 ..< 8])
         var diff: UInt8 = 0
@@ -115,7 +129,8 @@ enum BlePayload {
         let d = (nowMinute - m) & 0xFFFFFF
         guard min(d, 0x1000000 - d) <= 2 else { return nil }
         let f = b[4]
-        return (name, Int(b[2]) << 8 | Int(b[3]), f & 1 != 0, ear(f >> 1), f & 8 != 0, f & 16 != 0)
+        let prof = f & 32 == 0 ? "" : (f & 64 != 0 ? "buds" : "airpods")
+        return (name, Int(b[2]) << 8 | Int(b[3]), f & 1 != 0, ear(f >> 1), f & 8 != 0, f & 16 != 0, prof)
     }
 
     /// True when `new` is ahead of `old` in 16 bit wrapping order.

@@ -142,7 +142,10 @@ Mac specifics worth knowing:
 | `AutoGate.kt` | Pure gate logic (unit tested). |
 | `Earbuds.kt` | Active profile (AirPods or Buds) and the Bluetooth name filter. |
 | `EhLog.kt` | Log (memory plus rotated file), `EhState` (live state shared by service and UI), `PeerState`. |
-| `MainActivity.kt` | Whole UI built in code: five pages (Home, Buds, Devices, Settings, Activity) and a floating pill tab bar; `card()` makes an iOS style section (title above, rounded body; hiding the body hides the section); `switchRow()` and `segmented()` stay in sync through `syncs`. |
+| `HelperStarter.kt` | Starts and stops the clipboard helper through Shizuku (`newProcess` by reflection, shell uid only). |
+| `ClipAccessibilityService.kt` | Optional copy trigger (method "accessibility"): copy confirmations and System UI's clipboard preview open `ClipActivity`. `state()` is on only while the service is bound. |
+| `Glass.kt` | Liquid Glass style drawables and palette: page background, glass surfaces, buttons, segmented track, tab bar, header. |
+| `MainActivity.kt` | Whole UI built in code: six pages (Home, Buds, Clipboard, Devices, Settings, Activity), a glass tab bar with a sliding highlight and a header that appears on scroll; `card(title, footer)` makes a glass section (hiding the body hides the section); `switchRow()` and `segmented()` stay in sync through `syncs`; parts that list things rebuild only when their signature changes (`*Sig`), never every second. |
 | `Tiles.kt` | Quick settings tiles Take, Release, Auto switching and Noise control with live state; `Tiles.refreshAll`; `TileActions` (routes through the controller when the service runs). |
 | `NotifUi.kt` | The ongoing notification (custom collapsed and expanded layouts `notif_compact.xml`, `notif_expanded.xml`): status, battery bars, noise pills, Take or Release, Auto. Buttons go to `EarActionReceiver`. |
 | `Widget.kt` | Home screen widget (status line, Take, Release), receiver, shortcut activity. |
@@ -162,8 +165,8 @@ Android specifics worth knowing:
 Wi-Fi packet: one UDP JSON datagram to port 47474.
 
 ```
-{"v":2,"dev":"phone","ts":<ms>,"seq":<int>,"playing":0|1,"ear":"both|one|none|unknown","owner":0|1,"call":0|1,"sig":"<hex>"}
-canonical v2: "2|dev|ts|seq|playing|ear|owner|call"      (v1 had no call field and is still accepted)
+{"v":3,"dev":"phone","ts":<ms>,"seq":<int>,"playing":0|1,"ear":"both|one|none|unknown","owner":0|1,"call":0|1,"prof":"airpods|buds|","sig":"<hex>"}
+canonical v3: "3|dev|ts|seq|playing|ear|owner|call|prof"   (v2 had no prof, v1 no call; both are still accepted)
 sig = HMAC-SHA256(shared secret, canonical), lower case hex
 refused: bad JSON, bad signature, |now - ts| > 30 000 ms
 one sequence number per device, shared by both links (Bluetooth LE carries its low 16 bits)
@@ -177,11 +180,13 @@ Test vectors (keep them passing in all three implementations):
 * canonical `2|mac|1700000000000|7|1|both|0|1` gives
   `8c0b895c231d9329540318f0d015d6cc3d2e1007950972ce05ef20bf82ba2b8f`
 * BLE payload for that status at minute `1700000000000 / 60000` is `ea0000071707e997e90831cf5fb05515`
+* canonical `3|mac|1700000000000|7|1|both|0|1|buds` gives
+  `e0b6ceded3c4002c40a606404586e70634245c77a4f5aff28eedb1352866659d`, BLE payload `ea0000077752983dac7ce48782b05515`
 
 BLE payload (16 bytes carried as one 128 bit service UUID):
 `[0]=0xEA [1]=dev code (mac 0, phone 1, tab 2) [2..3]=seq [4]=flags [5..12]=first 8 bytes of HMAC(bytes 0..4 + 13..15)
 [13..15]=minutes since 1970, low 24 bits`. Flags: bit0 playing, bits1 to 2 ear (0 unknown, 1 none, 2 one, 3 both),
-bit3 owner, bit4 call. Refused when the minute stamp is more than 2 minutes off. The BLE seq is the low 16 bits of
+bit3 owner, bit4 call, bit5 earbud profile known, bit6 profile is Galaxy Buds. Refused when the minute stamp is more than 2 minutes off. The BLE seq is the low 16 bits of
 the device's main sequence number. Changing this format breaks the link until every device runs the new build.
 
 Galaxy Buds frames: `0xFD, 2 length bytes (little endian, low 10 bits = id + payload + 2), id, payload, CRC16 XModem
@@ -214,7 +219,8 @@ States: `idle`, `ownerIdle`, `playingWithoutEarbuds`, `claimPending`, `ownerPlay
 * **Ear removal**: pause on a trusted transition from in to out (one bud out counts when "pause when one is out" is on);
   resume within 120 s when back. Only medium or high confidence readings act. Right after EarHop's own pause, the
   resume trusts the pause for 3 s even if output still looks busy.
-* **Safe mode** after 3 failed claims in a row. Manual Take always works, also when gated or in safe mode.
+* **Safe mode** after 3 failed claims in a row. It ends by itself after 2 minutes, or at once when this or any fresh peer
+  has the earbuds. Manual Take always works, also when gated or in safe mode.
 * **Claim worker**: wait up to 8 s for a fresh owner peer to let go, then connect, verify ownership (Mac up to 15 s for
   Buds, Android 12 s per attempt for Buds), retry once.
 
@@ -312,6 +318,20 @@ Tooling notes:
     that are not EarHop's own (label EarHop).
 20. **Automatic switching can be off or paused on both apps** (`autoSwitch` and a non-saved pause on Mac, `auto` and
     `autoPausedUntil` on Android). Off or paused means no core tick at all; Take and Release still run.
+21. **Earbuds are detected automatically** (`earbudsMode` "auto" on both apps): the pair connected to this device, else the
+    `prof` of the fresh peer that has the earbuds, else no change. Android swaps the Buds channel or AirPods scanner live
+    in `EarService.detectEarbuds`; never restart the service for it. A pair picked by hand sets the mode to manual.
+22. **Do not count on the clipboard helper surviving a restart.** `ClipSync.watchHelper` restarts it through Shizuku when
+    Shizuku runs as the shell user (uid 2000; as root the helper's shell package calls fail). Without Shizuku only a
+    computer can start it (`tools/phone_clip.sh`).
+23. **One automatic sending method at a time** (`clipAutoMethod`: root, helper, accessibility, read through
+    `ClipSync.autoMethod`). Change it only with `ClipSync.setAutoMethod`, which stops the others; otherwise the root
+    watch, the helper and the accessibility trigger can all send the same copy. The accessibility service is the owner's
+    explicit choice (mistake 16): it never reads window contents and never logs event text. Do not show it as On from
+    the settings string alone; Android keeps EarHop listed after a crash (`ClipAccessibilityService.state` needs the
+    saved setting, Android's live enabled list and the bound service to agree). Installing a new APK on the phone switched
+    the service off (seen on 2026-10-29): after every install, the owner has to turn it on again. The app cannot open the
+    service's own settings page (OPEN_ACCESSIBILITY_DETAILS_SETTINGS is system only); it opens Accessibility scrolled to it.
 
 ## 10. Working rules from the owner
 
@@ -337,5 +357,6 @@ Tooling notes:
 * Galaxy Buds controls (noise, equalizer, spatial audio, touch lock, Find My Buds) are untested on the real Buds.
 * The Buds frame offsets were never compared against GalaxyBudsClient or captured frames.
 * The Mac app is signed with a local certificate, not a Developer ID, so it is not notarized.
-* Android `versionName` is still `0.1`; the Mac is `1.0.0`.
+* Android is `1.1.0` (versionCode 6); the Mac is `1.0.0`.
+* Shizuku start on boot and the automatic helper restart are not yet confirmed after a real phone restart.
 * Language support is not implemented.

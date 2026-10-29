@@ -27,6 +27,10 @@
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="true" />
 
     <queries>
+        <package android:name="moe.shizuku.privileged.api" />
+        <package android:name="com.vivo.permissionmanager" />
+        <package android:name="com.iqoo.secure" />
+        <package android:name="com.samsung.android.lool" />
         <intent>
             <action android:name="android.intent.action.MAIN" />
             <category android:name="android.intent.category.LAUNCHER" />
@@ -75,6 +79,14 @@
         </receiver>
 
         <receiver android:name=".EarActionReceiver" android:exported="false" />
+        <!-- Shizuku (Apache-2.0): receives Shizuku's binder, so EarHop can start the clipboard helper without a computer. -->
+        <provider
+            android:name="rikka.shizuku.ShizukuProvider"
+            android:authorities="${applicationId}.shizuku"
+            android:multiprocess="false"
+            android:enabled="true"
+            android:exported="true"
+            android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
         <provider
             android:name=".ClipHelperProvider"
             android:authorities="com.earhop.logger.helper"
@@ -179,6 +191,19 @@
             <intent-filter>
                 <action android:name="android.service.notification.NotificationListenerService" />
             </intent-filter>
+        </service>
+
+        <service
+            android:name=".ClipAccessibilityService"
+            android:exported="true"
+            android:label="EarHop clipboard send"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/clip_accessibility_service" />
         </service>
     </application>
 </manifest>

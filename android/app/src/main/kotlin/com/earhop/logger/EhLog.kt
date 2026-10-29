@@ -57,6 +57,8 @@ data class PeerState(
     val call: Boolean, val via: String, val seenAt: Long,
     val playingSince: Long = 0L, val lastPlayingAt: Long = 0L,
     val seq: Int = 0, val ts: Long = 0L,
+    /** The earbuds that device uses ("airpods", "buds", "" unknown), used to follow the owner's pair automatically. */
+    val prof: String = "",
 )
 
 data class Switch(val at: Long, val kind: String, val reason: String)

@@ -80,9 +80,12 @@ All tests at once: `bash tests/run.sh`.
 Copy on one device and paste on the others, encrypted with your shared secret. The clipboard has its own method
 (Bluetooth, Both, Wi-Fi; images always use Wi-Fi), set in the Mac popover or Settings, Clipboard, and on Android on Home or
 Devices. Clips from other devices arrive automatically everywhere. Sending automatically: the Mac always can; the rooted
-tablet uses root; the phone needs the clipboard helper, started once from the Mac with the phone connected over USB
-debugging (`bash tools/phone_clip.sh`), and again after the phone restarts. Without it, send from Android with the Send
-clipboard tile, the notification button or Share. Passwords marked as secret by a password manager are never sent.
+tablet uses root; the phone uses the clipboard helper or, if you prefer, the accessibility option (EarHop, Clipboard,
+Send copies automatically: Root, Helper or Accessibility, one at a time). Install the free app Shizuku, start it with Wireless debugging,
+turn on its Start on boot option and allow EarHop (EarHop, Clipboard shows each step): EarHop then starts the helper by
+itself whenever it is not running, also after a restart. Without Shizuku, start it from the Mac with the phone connected
+over USB debugging (`bash tools/phone_clip.sh`). Without the helper, send from Android with the Share clipboard tile, the
+notification button or Share. Passwords marked as secret by a password manager are never sent.
 
 ## Quick controls
 

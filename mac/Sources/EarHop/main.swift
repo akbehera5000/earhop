@@ -1,4 +1,5 @@
 import AppKit
+import IOBluetooth
 import Network
 import SwiftUI
 import ServiceManagement
@@ -15,6 +16,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var cachedOwner = false
     var lastSendAt = Date.distantPast
     var lastSentKey = ""
+    var earbudsCheckedAt = Date.distantPast
     var appsAt = Date.distantPast
     var cachedApps: [String]?
     var discovery: Discovery!
@@ -230,6 +232,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// Automatic earbuds: the pair connected to this Mac, else the pair the device holding the earbuds reports, else no
+    /// change. Switching goes through the normal settings path, the same as picking it in the popover.
+    func detectEarbuds() {
+        let c = state.cfg
+        guard c.earbudsMode == "auto" else { return }
+        func connected(_ address: String) -> Bool {
+            guard !address.isEmpty, let d = IOBluetoothDevice(addressString: address) else { return false }
+            return d.isConnected()
+        }
+        let want: String
+        if connected(c.budsAddress) { want = "buds" }
+        else if connected(c.airpodsAddress) { want = "airpods" }
+        else if let p = controller.ownerProfile() { want = p }
+        else { return }
+        guard want != c.earbuds else { return }
+        Log.write("earbuds: switching to \(want == "buds" ? "Galaxy Buds2 Pro" : "AirPods") (auto)")
+        state.cfg.earbuds = want
+    }
+
     func tick() {
         if Date().timeIntervalSince(clipPolledAt) >= 0.5 {
             clipPolledAt = Date(); clip.poll()
@@ -276,14 +297,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if state.earReading != reading { state.earReading = reading }
         let holder = controller.ownerPeer()
         if state.holder != holder { state.holder = holder }
+        if Date().timeIntervalSince(earbudsCheckedAt) >= 2 { earbudsCheckedAt = Date(); detectEarbuds() }
         // Send immediately when something changed, otherwise once a second as a heartbeat.
         let shown = controller.core.advertisedPlaying(playing)
-        let key = "\(shown)|\(ear.rawValue)|\(owner)|\(inCall)"
+        let key = "\(shown)|\(ear.rawValue)|\(owner)|\(inCall)|\(state.cfg.earbuds)"
         if key != lastSentKey || Date().timeIntervalSince(lastSendAt) >= 1 {
             lastSentKey = key
             lastSendAt = Date()
             seq += 1
-            let status = Status(dev: state.cfg.deviceName, ts: Proto.nowMs(), seq: seq, playing: shown, ear: ear, owner: owner, call: inCall)
+            let status = Status(dev: state.cfg.deviceName, ts: Proto.nowMs(), seq: seq, playing: shown, ear: ear, owner: owner,
+                                call: inCall, prof: state.cfg.isBuds ? "buds" : "airpods")
             sendStatus(status)
         }
         let keys = AudioMonitor.canPostKeys
@@ -397,6 +420,15 @@ if CommandLine.arguments.contains("--selftest") {
     check("ble replay refused", BlePayload.decode(bleBytes, secret: "test-secret", nowMinute: bleMin + 3) == nil)
     var tampered = bleBytes; tampered[15] ^= 1
     check("ble stamp is signed", BlePayload.decode(tampered, secret: "test-secret", nowMinute: bleMin) == nil)
+    var v3 = v2; v3.prof = "buds"
+    check("canonical v3", Proto.canonical(v3, v: 3) == "3|mac|1700000000000|7|1|both|0|1|buds")
+    check("hmac v3 vector", Proto.sign("test-secret", Proto.canonical(v3, v: 3)) == "e0b6ceded3c4002c40a606404586e70634245c77a4f5aff28eedb1352866659d")
+    let v3wire = Proto.encode(Status(dev: "phone", ts: now, seq: 4, playing: false, ear: .both, owner: true, prof: "buds"), secret: "k")!
+    check("profile roundtrip", Proto.decode(v3wire, secret: "k", nowMs: now)?.prof == "buds")
+    let ble3 = BlePayload.encode(v3, secret: "test-secret", minute: bleMin)!
+    check("ble v3 vector", ble3.map { String(format: "%02x", $0) }.joined() == "ea0000077752983dac7ce48782b05515")
+    check("ble profile roundtrip", BlePayload.decode(ble3, secret: "test-secret", nowMinute: bleMin)?.prof == "buds")
+    check("ble old payload has no profile", BlePayload.decode(bleBytes, secret: "test-secret", nowMinute: bleMin)?.prof == "")
     check("order newer wifi copy taken", PeerOrder.accept(lastSeq: 10, seq: 11, ble: false) == (true, 11))
     check("order duplicate not taken", !PeerOrder.accept(lastSeq: 10, seq: 10, ble: false).take)
     check("order late copy not taken", !PeerOrder.accept(lastSeq: 10, seq: 8, ble: false).take)

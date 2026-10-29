@@ -162,6 +162,39 @@ Mac with Buds: if the channel is not open, ear is assumed `both`. The channel cl
 27. (Opus, 2026-10-28) Code review fixes: Mac `CallDetector` (mic and speaker together for 2 s); AirPods beacon source picking by signal strength (8 dB window) on both; Android status order filter; BLE payload v2 with a signed minute stamp in bytes 13..15 (all three implementations share the vector `ea0000071707e997e90831cf5fb05515`, so every device must run the new build for the BLE fallback), BLE sequence reset after 30 s silence and low power after 60 s; Mac hotkey handler once, log rotation; Android log file, gate cache 0.5 s, 2 s voice chat confirmation, manual result only for manual actions. Tests: Mac self test, 55 Android unit tests, Python selftest.
 28. (Opus, 2026-10-28) The Mac restarted music after a release: `MediaControl` pressed the toggle key when output looked busy 6 s after an explicit pause, but browsers keep output open after pausing. EarHop never presses the key on its own now. Links: Bluetooth LE and Wi-Fi together by default (`transport` setting both, ble, wifi), one shared sequence number, `PeerOrder` merge with tests. The phone reached the Mac over Bluetooth LE at 09:40 that morning (first real proof).
 
+29. (Opus, 2026-10-29) "Idle in the morning": the service kept running, but a call at 10:06 tried 3 times to take the
+    Buds while they were in their case, so safe mode paused automatic switching until Resume. Safe mode now ends by
+    itself after 2 minutes, or at once when any device has the earbuds (both cores, sims 7b, 7c and
+    `safeModeEndsByItself`, `safeModeEndsWhenEarbudsAreSeenAgain`).
+30. (Opus, 2026-10-29) Protocol v3: the status carries the earbud profile ("airpods" or "buds"): Wi-Fi canonical
+    `3|dev|ts|seq|playing|ear|owner|call|prof`, Bluetooth LE flags bit5 (known) and bit6 (Buds). v1 and v2 are still
+    accepted. With it both apps detect the earbuds automatically (connected here, else the holder's profile); a pair
+    chosen by hand still works. Android switches the Buds channel or AirPods scanner live, without a restart.
+31. (Opus, 2026-10-29) The phone's clipboard helper dies with every restart. EarHop now starts it through Shizuku
+    (`HelperStarter`, Apache-2.0 library) whenever it is missing (`ClipSync.watchHelper`, every minute, at most every
+    90 s), once the user installed Shizuku, started it with Wireless debugging and allowed EarHop.
+32. (Opus, 2026-10-29) Android app pages: Home (summary and main switches for audio and clipboard), Buds (automatic
+    earbuds, controls, in-ear detection, names), Clipboard (sync, automatic sending and helper with Shizuku steps,
+    method, pause, send to), Devices, Settings (switching, keep running: battery and auto-start pages), Activity.
+    EarHop starts when the app opens; the Running chip no longer stops it.
+33. (Codex, 2026-10-29) Added an opt-in accessibility copy trigger for the unrooted phone. It matches a small set of
+    copy confirmation strings from accessibility events and opens `ClipActivity` with automatic sending enabled.
+    It does not request window-content access and does not log event text or clipboard contents. The user must enable
+    both the EarHop option and the service in Android Accessibility settings. Detection and foreground launch are
+    heuristic and have not been checked on the real phone.
+34. (2026-10-29) Android redesign and clipboard method fixes. The accessibility status showed On whenever EarHop was
+    listed in Android's enabled services string, which stays set after a crash or an adb change; it now needs the service
+    to be bound (`ClipAccessibilityService.connected`, `state()` returns on, listed or off). Automatic sending has one
+    method at a time (`clipAutoMethod`: root, helper, accessibility; `ClipSync.autoMethod` and `setAutoMethod`): choosing
+    another method stops the root watch, stops the helper through Shizuku and makes `onHelper` ignore helper copies, so
+    two methods never send the same copy. Root is always offered; without su it only explains that. The accessibility service also
+    listens for window changes of System UI's clipboard preview and for announcements. New look (`Glass.kt`): glass cards,
+    an AMOLED black page (owner's choice, no gradient), a header that appears on scroll and a tab bar with a sliding highlight, both showing the page under them blurred
+    (`MainActivity.blurBehind`: the page drawn small into a bitmap, RenderEffect blur on Android 12+), haptics.
+    Regrouped pages, a Needs attention card on Home, Home toggles (long press pauses), a device strip, a battery card,
+    recent clips (memory only), QR pairing in the app (ZXing Android Embedded, Apache-2.0), self test, Copy diagnostics,
+    log filters and Share log. Earbud names apply live (`EarService.detectEarbuds`). Checked on the phone with
+    screenshots of every page in dark and light mode; the tablet, QR scanning and real copy detection are untested.
 
 ## 8. What is built (feature list)
 

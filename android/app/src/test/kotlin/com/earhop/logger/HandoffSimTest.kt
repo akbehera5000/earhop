@@ -156,6 +156,25 @@ class HandoffSimTest {
         assertEquals(HandoffCore.Pending.CLAIM, phone.core.pending)
     }
 
+    @Test fun safeModeEndsByItself() {
+        val w = World(); val mac = w.add("mac", true); val phone = w.add("phone")
+        w.holder = "mac"; mac.online = false
+        w.play(phone); w.run(90.0)
+        assertTrue(phone.core.safeMode)
+        w.run(120.0)
+        assertTrue("claims resume after safe mode ends", phone.claims > 3)
+    }
+
+    @Test fun safeModeEndsWhenEarbudsAreSeenAgain() {
+        val w = World(); val mac = w.add("mac", true); val phone = w.add("phone")
+        w.holder = "mac"; mac.online = false
+        w.play(phone); w.run(90.0)
+        assertTrue(phone.core.safeMode)
+        mac.online = true
+        w.run(3.0)
+        assertFalse(phone.core.safeMode)
+    }
+
     @Test fun callOnPhoneTakesEarbuds() {
         val w = World(); val mac = w.add("mac", true) { it.callNeedsPlaying = true }; val phone = w.add("phone")
         w.holder = "mac"; w.play(mac); w.run(5.0)

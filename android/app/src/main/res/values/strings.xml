@@ -4,4 +4,5 @@
     <string name="shortcut_take_long">Take the earbuds</string>
     <string name="shortcut_release">Release</string>
     <string name="shortcut_release_long">Release the earbuds</string>
+    <string name="clip_accessibility_description">Detects copy confirmation messages to send clipboard text to your other devices. EarHop reads the clipboard only after its send screen opens.</string>
 </resources>

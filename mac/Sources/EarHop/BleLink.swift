@@ -78,7 +78,7 @@ final class BleLink: NSObject, CBPeripheralManagerDelegate {
             if let last = lastForward[m.dev], last.seq == m.seq, Date().timeIntervalSince(last.at) < 0.5 { continue }
             lastForward[m.dev] = (m.seq, Date())
             onStatus?(Status(dev: m.dev, ts: Proto.nowMs(), seq: m.seq, playing: m.playing,
-                             ear: m.ear, owner: m.owner, call: m.call))
+                             ear: m.ear, owner: m.owner, call: m.call, prof: m.prof))
         }
     }
 }

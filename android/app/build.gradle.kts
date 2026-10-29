@@ -11,8 +11,8 @@ android {
         applicationId = "com.earhop.logger"
         minSdk = 26
         targetSdk = 34
-        versionCode = 5
-        versionName = "1.0.1"
+        versionCode = 6
+        versionName = "1.1.0"
     }
 
     compileOptions {
@@ -25,5 +25,10 @@ android {
 }
 
 dependencies {
+    // Shizuku (Apache-2.0): lets EarHop start its clipboard helper as the shell user without a computer.
+    implementation("dev.rikka.shizuku:api:13.1.5")
+    implementation("dev.rikka.shizuku:provider:13.1.5")
+    // ZXing Android Embedded (Apache-2.0): scans the Mac's pairing QR code inside EarHop.
+    implementation("com.journeyapps:zxing-android-embedded:4.3.0")
     testImplementation("junit:junit:4.13.2")
 }

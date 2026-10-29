@@ -60,6 +60,9 @@ struct Config: Codable, Equatable {
     var clipHistory: Int = 10
     /// Automatic earbud switching. Off: only Take and Release move the earbuds.
     var autoSwitch: Bool = true
+    /// "auto": follow the earbuds in use (connected here, or the pair the device holding them reports).
+    /// "manual": keep `earbuds` as chosen.
+    var earbudsMode: String = "auto"
 
     var isBuds: Bool { earbuds == "buds" }
     /// Address of the active pair.
@@ -95,7 +98,7 @@ struct Config: Codable, Equatable {
         opt(.clipSync, &base.clipSync); opt(.clipImages, &base.clipImages); opt(.clipTransport, &base.clipTransport)
         opt(.clipAuto, &base.clipAuto); opt(.clipReceive, &base.clipReceive); opt(.clipExclude, &base.clipExclude)
         opt(.clipNotify, &base.clipNotify); opt(.clipHistory, &base.clipHistory)
-        opt(.autoSwitch, &base.autoSwitch)
+        opt(.autoSwitch, &base.autoSwitch); opt(.earbudsMode, &base.earbudsMode)
         self = base
     }
 

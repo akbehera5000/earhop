@@ -185,6 +185,26 @@ func runHandoffSimTests(_ check: (String, Bool) -> Void) {
         _ = phone.core.manualClaim(now: w.now)
         check("sim7 manual take still allowed in safe mode", phone.core.pending == .claim)
     }
+    // 7b. Safe mode ends by itself after two minutes (the earbuds were only in the case), so switching resumes.
+    do {
+        let w = HandoffSim()
+        let mac = w.add("mac", toggle: true), phone = w.add("phone")
+        w.holder = "mac"; mac.online = false
+        w.userPlay(phone); w.run(90)
+        check("sim7b in safe mode first", phone.core.safeMode)
+        w.run(120)
+        check("sim7b safe mode ends by itself and claims resume", phone.claims > 3)
+    }
+    // 7c. Safe mode ends at once when a device has the earbuds again.
+    do {
+        let w = HandoffSim()
+        let mac = w.add("mac", toggle: true), phone = w.add("phone")
+        w.holder = "mac"; mac.online = false
+        w.userPlay(phone); w.run(90)
+        mac.online = true
+        w.run(3)
+        check("sim7c safe mode ends when the earbuds are seen again", !phone.core.safeMode)
+    }
     // 9. A call on the phone while the Mac owns the earbuds.
     do {
         let w = HandoffSim()

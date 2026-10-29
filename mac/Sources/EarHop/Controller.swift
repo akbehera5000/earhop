@@ -110,6 +110,13 @@ final class Controller {
     }
 
     /// The fresh peer that holds the earbuds, if any.
+    /// The earbud profile reported by the device that has the earbuds now, if it says.
+    func ownerProfile() -> String? {
+        lock.lock(); defer { lock.unlock() }
+        let now = Date()
+        return peers.values.first { $0.status.owner && !$0.status.prof.isEmpty && now.timeIntervalSince($0.seenAt) < 5 }?.status.prof
+    }
+
     func ownerPeer() -> String? {
         lock.lock(); defer { lock.unlock() }
         let now = Date()

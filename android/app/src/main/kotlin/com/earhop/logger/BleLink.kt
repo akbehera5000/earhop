@@ -18,7 +18,8 @@ import java.util.UUID
  * Bluetooth LE payload, 16 bytes carried as one 128 bit service UUID.
  * [0]=0xEA [1]=dev code [2..3]=seq [4]=flags [5..12]=truncated HMAC of bytes 0..4 and 13..15
  * [13..15]=minutes since 1970 (low 24 bits). The signed minute stamp refuses recordings older than 2 minutes.
- * Flags: bit0 playing, bits1-2 ear (0 unknown 1 none 2 one 3 both), bit3 owner, bit4 call.
+ * Flags: bit0 playing, bits1-2 ear (0 unknown 1 none 2 one 3 both), bit3 owner, bit4 call, bit5 earbud profile known,
+ * bit6 profile is Galaxy Buds (else AirPods).
  */
 object BlePayload {
     val devCodes = mapOf("mac" to 0, "phone" to 1, "tab" to 2)
@@ -29,7 +30,8 @@ object BlePayload {
     fun encode(s: Status, secret: String, minute: Int = minute(System.currentTimeMillis())): ByteArray? {
         val dev = devCodes[s.dev] ?: return null
         val flags = (if (s.playing) 1 else 0) or (ears.indexOf(s.ear).coerceAtLeast(0) shl 1) or
-            (if (s.owner) 8 else 0) or (if (s.call) 16 else 0)
+            (if (s.owner) 8 else 0) or (if (s.call) 16 else 0) or
+            when (s.prof) { "airpods" -> 32; "buds" -> 96; else -> 0 }
         val head = byteArrayOf(0xEA.toByte(), dev.toByte(), ((s.seq shr 8) and 0xFF).toByte(), (s.seq and 0xFF).toByte(), flags.toByte())
         val stamp = byteArrayOf(((minute shr 16) and 0xFF).toByte(), ((minute shr 8) and 0xFF).toByte(), (minute and 0xFF).toByte())
         return head + Proto.signRaw(secret, head + stamp).copyOfRange(0, 8) + stamp
@@ -45,7 +47,8 @@ object BlePayload {
         val name = devCodes.entries.firstOrNull { it.value == (b[1].toInt() and 0xFF) }?.key ?: return null
         val f = b[4].toInt() and 0xFF
         val seq = ((b[2].toInt() and 0xFF) shl 8) or (b[3].toInt() and 0xFF)
-        return Status(name, System.currentTimeMillis(), seq, f and 1 != 0, ears[(f shr 1) and 3], f and 8 != 0, f and 16 != 0)
+        val prof = if (f and 32 == 0) "" else if (f and 64 != 0) "buds" else "airpods"
+        return Status(name, System.currentTimeMillis(), seq, f and 1 != 0, ears[(f shr 1) and 3], f and 8 != 0, f and 16 != 0, prof)
     }
 
     fun isNewer(new: Int, old: Int): Boolean {

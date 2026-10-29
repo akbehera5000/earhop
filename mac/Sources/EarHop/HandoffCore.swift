@@ -65,6 +65,8 @@ struct HandoffSettings {
     var resumeWithin: TimeInterval = 120
     var pauseWhenOneOut = true
     var safeModeAfter = 3
+    /// Safe mode ends by itself after this long, or earlier when any device has the earbuds connected.
+    var safeModeSeconds: TimeInterval = 120
     /// When false, an unknown ear state counts as "in" for claims (Android without a working ear source).
     var requireEar = true
     /// The Mac treats a busy microphone as a call only while it also plays; Android knows real call states.
@@ -208,6 +210,8 @@ final class HandoffCore {
     func manualClaim(now: Date) -> [HandoffAction] { startClaim("manual", manual: true, now) }
     func manualRelease(now: Date) -> [HandoffAction] { startRelease("manual", now) }
 
+    private var safeSince = Date.distantPast
+
     func claimFinished(ok: Bool, manual: Bool, failure: String?, now: Date) -> [HandoffAction] {
         if pending == .claim { pending = nil }
         lastHandoff = now
@@ -221,6 +225,7 @@ final class HandoffCore {
         var out: [HandoffAction] = [.info("Claim failed (\(failures) in a row): \(failure ?? "the earbuds did not connect")")]
         if failures >= settings.safeModeAfter && !manual && !safeMode {
             safeMode = true
+            safeSince = now
             out.append(.safeMode(true))
         }
         return out
@@ -259,6 +264,13 @@ final class HandoffCore {
         if i.ear.ear == .none { if earOutSince == nil { earOutSince = now } } else { earOutSince = nil }
         if i.owner { if ownerSince == nil { ownerSince = now } } else { ownerSince = nil }
         let fresh = i.peers.filter { now.timeIntervalSince($0.seenAt) < 5 }
+        // Safe mode is a pause, not a stop: it ends after safeModeSeconds, or as soon as some device has the earbuds,
+        // which shows they work again (they were often just in the case while a call tried to take them).
+        if safeMode, now.timeIntervalSince(safeSince) >= settings.safeModeSeconds || i.owner || fresh.contains(where: { $0.owner }) {
+            safeMode = false
+            failures = 0
+            out.append(.safeMode(false))
+        }
         let cooled = now.timeIntervalSince(lastHandoff) >= cooldownNow
         inCallPhase = false
 

@@ -1,5 +1,53 @@
 # Changelog
 
+## 2026-10-29, Android redesign, one clipboard method at a time
+
+* Fixed: the Accessibility setup said On while the service was off in Android settings. The status now needs the
+  saved setting, Android's live list of enabled services and the running service to agree, updates the moment the
+  setting changes, and shows both facts ("Android setting: On/Off, Service: running/not running"). A button always
+  opens Accessibility settings scrolled to EarHop clipboard send. Note: updating the APK turned the service off on the
+  phone, so turn it on again after an update.
+* Automatic sending is Root, Helper or Accessibility, one at a time (Root is always shown; on a device without root it
+  says so and keeps the current method). Switching stops the other method
+  (including the helper, through Shizuku), so a copy is never sent twice.
+* New Liquid Glass style look: flat frosted glass cards with a light rim (no gradients) on a plain AMOLED black
+  background (plain light grey in light mode); the tab bar and the header show the page under them, blurred live
+  (real blur on Android 12 and later, a softer scaled-down image before), frosted header on scroll, glass tab bar with
+  a sliding highlight, haptic feedback (can be turned off in Appearance).
+* Home: Needs attention card with one-tap fixes, large toggles for Switching, Clipboard and Noise (long press to pause),
+  your devices at a glance, clipboard summary, recent switches.
+* Buds: battery for left, right and case; earbud names under Advanced, applied without a restart.
+* Clipboard: per-method status and setup steps, recent clips (memory only, tap to copy again), clearer names.
+* Devices: scan the Mac's QR code inside EarHop; Save restarts EarHop only when the name or secret changed.
+* Settings: Keep EarHop running shows battery status for EarHop and Shizuku; About has version, self test and Copy
+  diagnostics (no secret or addresses). Activity: log filters and Share log.
+* Checked on the phone (dark and light). Not yet tried: the tablet, QR scanning, copy detection with real copies.
+
+## 2026-10-29, optional accessibility clipboard trigger
+
+* Added an opt-in Android accessibility service for automatic phone clipboard sending when the shell-user helper is
+  unavailable. It checks copy confirmation event text only, then briefly opens EarHop's existing send screen. Android
+  accessibility access must also be enabled by the user. Detection is heuristic and may miss copies; it has not yet
+  been verified on the real phone.
+
+## 2026-10-29, always on, automatic earbuds, Shizuku helper, new Android sections
+
+* Morning report "EarHop was idle": the phone log shows the service ran all night, but a call at 10:06 to 10:09 tried
+  three times to take the Buds while no device had them (in the case), which put switching into safe mode until Resume
+  at 10:14. Safe mode now ends by itself after 2 minutes, or at once when a device has the earbuds. Two new simulator
+  tests on each platform.
+* Automatic earbuds on Mac and Android (Auto, AirPods, Buds): the pair connected to this device, else the pair the
+  device holding the earbuds reports. For that the status carries the profile (protocol v3 on Wi-Fi, two spare signed
+  flag bits on Bluetooth LE; v1 and v2 still accepted; new test vectors in Python, Swift and Kotlin). Android switches
+  live without restarting the service. The tablet must get this APK: until then it refuses the new Wi-Fi packets
+  (Bluetooth LE still works).
+* Clipboard helper: EarHop starts it through Shizuku whenever it is missing (checked every minute), once Shizuku is
+  installed, started and has allowed EarHop. The Clipboard section shows the helper's state, a Start helper button and
+  the Shizuku steps. Not yet tested: Shizuku is not installed on the phone.
+* Android sections: Home (summary and main switches for earbuds and clipboard), Buds, Clipboard (new), Devices,
+  Settings (with Keep EarHop running: battery and auto-start buttons), Activity. EarHop starts whenever the app opens,
+  and the Running chip opens Settings instead of stopping it. Version 1.1.0. Checked on the phone with screenshots.
+
 ## 2026-10-29, notification labels and a single icon
 
 * The robot icon on the phone was a cached icon: it went away after a phone restart. The extra large icon added

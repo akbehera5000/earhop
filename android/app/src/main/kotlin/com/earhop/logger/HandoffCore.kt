@@ -35,6 +35,8 @@ data class HandoffSettings(
     var resumeWithinMs: Long = 120_000,
     var pauseWhenOneOut: Boolean = true,
     var safeModeAfter: Int = 3,
+    /** Safe mode ends by itself after this long, or earlier when any device has the earbuds connected. */
+    var safeModeMs: Long = 120_000,
     /** When false, an unknown ear state counts as "in" for claims. */
     var requireEar: Boolean = false,
     /** Android knows real call states, so a call claims even when no music plays. */
@@ -112,6 +114,8 @@ class HandoffCore(var settings: HandoffSettings) {
     fun manualClaim(now: Long) = startClaim("manual", true, now)
     fun manualRelease(now: Long) = startRelease("manual", now)
 
+    private var safeSince = 0L
+
     fun claimFinished(ok: Boolean, manual: Boolean, failure: String?, now: Long): List<HandoffAction> {
         if (pending == Pending.CLAIM) pending = null
         lastHandoff = now
@@ -123,7 +127,7 @@ class HandoffCore(var settings: HandoffSettings) {
         }
         failures++
         val out = mutableListOf<HandoffAction>(HandoffAction.Info("Claim failed ($failures in a row): ${failure ?: "the earbuds did not connect"}"))
-        if (failures >= settings.safeModeAfter && !manual && !safeMode) { safeMode = true; out += HandoffAction.SafeMode(true) }
+        if (failures >= settings.safeModeAfter && !manual && !safeMode) { safeMode = true; safeSince = now; out += HandoffAction.SafeMode(true) }
         return out
     }
 
@@ -155,6 +159,12 @@ class HandoffCore(var settings: HandoffSettings) {
             if (i.ear.ear == "none") { if (earOutSince == 0L) earOutSince = now } else earOutSince = 0L
             if (i.owner) { if (ownerSince == 0L) ownerSince = now } else ownerSince = 0L
             val fresh = i.peers.filter { now - it.seenAt < 5000 }
+            // Safe mode is a pause, not a stop: it ends after safeModeMs, or as soon as some device has the earbuds,
+            // which shows they work again (they were often just in the case while a call tried to take them).
+            if (safeMode && (now - safeSince >= settings.safeModeMs || i.owner || fresh.any { it.owner })) {
+                safeMode = false; failures = 0
+                out += HandoffAction.SafeMode(false)
+            }
             val cooled = now - lastHandoff >= cooldownNow
             inCallPhase = false
 

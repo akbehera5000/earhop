@@ -32,6 +32,10 @@ class EarService : Service() {
     private var wifiLock: android.net.wifi.WifiManager.WifiLock? = null
     private var netCallback: android.net.ConnectivityManager.NetworkCallback? = null
     private val startedAt = System.currentTimeMillis()
+    /** The active earbuds; both can change while running (see detectEarbuds). */
+    @Volatile private var useBuds = false
+    @Volatile private var filter = ""
+    private var lastEarbudCheck = 0L
 
     companion object {
         const val ACTION_TAKE = "com.earhop.logger.TAKE"
@@ -80,7 +84,8 @@ class EarService : Service() {
         val name = p.getString("name", if (resources.configuration.smallestScreenWidthDp >= 600) "tab" else "phone")
             ?: "phone"
         val secret = p.getString("secret", "") ?: ""
-        val filter = Earbuds.filter(this)
+        useBuds = Earbuds.isBuds(this)
+        filter = Earbuds.filter(this)
         EhState.error = null
         EhLog.w("service start dev=$name selftest=${Proto.selfTest()}")
 
@@ -92,16 +97,8 @@ class EarService : Service() {
             link = null
         }
         try { ble = BleLink(this, secret, name) { s -> onPeer(s, "ble") } } catch (e: Exception) { EhLog.w("ble init failed: ${e.message}") }
-        val useBuds = Earbuds.isBuds(this)
-        if (useBuds) {
-            try { buds = BudsClient(this, { Earbuds.filter(this) }) { isOwner(filter) }.also { it.start() } } catch (e: Exception) { EhLog.w("buds init failed: ${e.message}") }
-        } else {
-            try { ears = EarScanner(this, -75, false).also { it.start() } } catch (e: Exception) { EhLog.w("ear scan failed: ${e.message}") }
-        }
         try { openA2dp() } catch (e: Exception) { EhLog.w("a2dp failed: ${e.message}") }
-        if (!useBuds) try {
-            aacp = AacpClient(this, filter, { isOwner(filter) }) { e -> ears?.setAacp(e) }.also { it.start() }
-        } catch (e: Exception) { EhLog.w("aacp init failed: ${e.message}") }
+        startEarbudParts()
 
         // Keep the CPU and Wi-Fi awake so packets keep flowing with the screen off.
         try {
@@ -161,16 +158,17 @@ class EarService : Service() {
                     // Send at once when something changed, otherwise once a second as a heartbeat.
                     // Stale audio right after letting go is not announced as playing (see HandoffCore.advertisedPlaying).
                     val shown = controller?.core?.advertisedPlaying(playing) ?: playing
-                    val key = "$shown|$ear|$owner|$call"
+                    val key = "$shown|$ear|$owner|$call|$useBuds"
                     val now = System.currentTimeMillis()
                     if (key != lastKey || now - lastSendAt >= 1000) {
                         lastKey = key
                         lastSendAt = now
                         seq++
-                        val st = Status(name, now, seq, shown, ear, owner, call)
+                        val st = Status(name, now, seq, shown, ear, owner, call, if (useBuds) "buds" else "airpods")
                         sendStatus(st)
                     }
                     controller?.tick(playing, reading, owner, call, EhState.peers.values, AppRules.preferredPlaying(this))
+                    if (now - lastEarbudCheck >= 2000) { lastEarbudCheck = now; detectEarbuds() }
                     updateNotification()
                     if (now - lastLogAt >= 5000) {
                         lastLogAt = now
@@ -184,6 +182,60 @@ class EarService : Service() {
         }, "earhop-loop")
         thread?.start()
         return START_STICKY
+    }
+
+    /** Starts the parts that belong to the active earbuds: the Galaxy Buds channel, or the AirPods scanner and channel. */
+    private fun startEarbudParts() {
+        if (useBuds) {
+            try { buds = BudsClient(this, { Earbuds.filter(this) }) { isOwner(filter) }.also { it.start() } } catch (e: Exception) { EhLog.w("buds init failed: ${e.message}") }
+        } else {
+            try { ears = EarScanner(this, -75, false).also { it.start() } } catch (e: Exception) { EhLog.w("ear scan failed: ${e.message}") }
+            try {
+                aacp = AacpClient(this, filter, { isOwner(filter) }) { e -> ears?.setAacp(e) }.also { it.start() }
+            } catch (e: Exception) { EhLog.w("aacp init failed: ${e.message}") }
+        }
+    }
+
+    private fun stopEarbudParts() {
+        try { buds?.stop() } catch (e: Exception) { }
+        try { aacp?.stop() } catch (e: Exception) { }
+        try { ears?.stop() } catch (e: Exception) { }
+        buds = null; aacp = null; ears = null
+    }
+
+    /**
+     * Which earbuds to use: chosen by hand ("airpods" or "buds"), or automatic (the default): the pair connected to this
+     * device, else the pair of the device that has the earbuds (it says so in its status), else no change.
+     */
+    @SuppressLint("MissingPermission")
+    private fun detectEarbuds() {
+        val p = getSharedPreferences("earhop", MODE_PRIVATE)
+        // Earbud names edited on the Buds page apply at once.
+        Earbuds.filter(this).let { if (it != filter && Earbuds.isBuds(this) == useBuds) { filter = it; controller?.filter = it } }
+        val want: Boolean = when (p.getString("earbudsMode", "auto")) {
+            "airpods" -> false
+            "buds" -> true
+            else -> {
+                val names = try { a2dp?.connectedDevices?.mapNotNull { it.name } ?: emptyList() } catch (e: Exception) { emptyList() }
+                val budsName = p.getString("filterBuds", "Buds2 Pro") ?: "Buds2 Pro"
+                val podsName = p.getString("filter", "AirPods") ?: "AirPods"
+                val holder = EhState.peers.values.firstOrNull { it.owner && it.prof.isNotEmpty() && System.currentTimeMillis() - it.seenAt < 5000 }
+                when {
+                    names.any { it.contains(budsName, ignoreCase = true) } -> true
+                    names.any { it.contains(podsName, ignoreCase = true) } -> false
+                    holder != null -> holder.prof == "buds"
+                    else -> return
+                }
+            }
+        }
+        if (want == useBuds) return
+        EhLog.w("earbuds: switching to ${if (want) "Galaxy Buds2 Pro" else "AirPods"} (${p.getString("earbudsMode", "auto")})")
+        Earbuds.setBuds(this, want)
+        stopEarbudParts()
+        useBuds = want
+        filter = Earbuds.filter(this)
+        controller?.filter = filter
+        startEarbudParts()
     }
 
     /**
@@ -227,7 +279,8 @@ class EarService : Service() {
         if (!take) { if (prev != null) EhState.peers[s.dev] = prev.copy(seenAt = now); return }
         val since = if (!s.playing) 0L else (prev?.playingSince?.takeIf { it != 0L } ?: now)
         val last = if (s.playing) now else (prev?.lastPlayingAt ?: 0L)
-        val old = EhState.peers.put(s.dev, PeerState(s.dev, s.playing, s.ear, s.owner, s.call, via, now, since, last, fullSeq, s.ts))
+        val old = EhState.peers.put(s.dev, PeerState(s.dev, s.playing, s.ear, s.owner, s.call, via, now, since, last, fullSeq, s.ts,
+            s.prof.ifEmpty { prev?.prof ?: "" }))
         if (old == null || old.playing != s.playing || old.ear != s.ear || old.owner != s.owner || old.call != s.call) {
             EhLog.w("peer ${s.dev} ($via): playing=${s.playing} ear=${s.ear} owner=${s.owner} call=${s.call}")
         }

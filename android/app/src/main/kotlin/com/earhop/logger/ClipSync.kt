@@ -234,6 +234,27 @@ object ClipSync {
 
     private fun event(text: String) { lastEvent = text; lastEventAt = System.currentTimeMillis() }
 
+    /**
+     * Recent clips, newest first, kept in memory only: never written to a file or the log, gone when EarHop stops.
+     * Text is kept so it can be copied again; images only as an entry.
+     */
+    class Recent(val at: Long, val sent: Boolean, val dev: String, val kind: String, val text: String?, val size: Int)
+    val recent = java.util.concurrent.CopyOnWriteArrayList<Recent>()
+    fun keepRecent(ctx: Context) = prefs(ctx).getBoolean("clipHistory", true)
+    private fun addRecent(ctx: Context, r: Recent) {
+        if (!keepRecent(ctx)) return
+        recent.add(0, r)
+        while (recent.size > 10) recent.removeAt(recent.size - 1)
+    }
+
+    /** Puts a recent text back on this clipboard without sending it again. */
+    fun copyBack(ctx: Context, text: String) {
+        val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        ownWriteAt = System.currentTimeMillis()
+        lastReceivedHash = text.toByteArray().contentHashCode()
+        cm.setPrimaryClip(ClipData.newPlainText("EarHop", text))
+    }
+
     fun start(ctx: Context) {
         val app = ctx.applicationContext
         tcp = ClipTcp { f -> receive(app, f, "Wi-Fi") }.also { it.start() }
@@ -260,6 +281,61 @@ object ClipSync {
             listener = l
         }
         tryStartAuto(app)
+        // Keep the helper running: check a minute after start (an existing helper says hello within 60 s), then every
+        // minute, and again a minute after Shizuku comes up (after a phone restart it starts later than EarHop).
+        main.removeCallbacks(helperWatch)
+        helperApp = app
+        main.postDelayed(helperWatch, 70_000)
+        HelperStarter.onShizukuReady { main.postDelayed({ watchHelper(app) }, 70_000) }
+    }
+
+    @Volatile private var helperApp: Context? = null
+    @Volatile private var helperStartedAt = 0L
+    private val helperWatch: Runnable = object : Runnable {
+        override fun run() { helperApp?.let { watchHelper(it) }; main.postDelayed(this, 60_000) }
+    }
+
+    /** Whether automatic sending should use the helper here (the method chosen on the Clipboard page). */
+    fun wantsHelper(ctx: Context) = enabled(ctx) && autoRoot(ctx) && autoMethod(ctx) == "helper"
+
+    /**
+     * How copies on this device are noticed: "root" (system log watch as root), "helper" (the shell-user helper, started
+     * by Shizuku or a computer) or "accessibility" (copy confirmations, ClipAccessibilityService). Only the chosen one
+     * runs. Without a choice: root when it was granted, else the helper.
+     */
+    fun autoMethod(ctx: Context): String {
+        val p = prefs(ctx)
+        val m = p.getString("clipAutoMethod", null)
+        if (m == "root" && !RootShell.hasSu()) return "helper"
+        return m ?: if (p.getBoolean("rootGranted", false)) "root" else "helper"
+    }
+
+    /** Switches the method: stops what the old one runs and starts the new one. */
+    fun setAutoMethod(ctx: Context, m: String) {
+        val app = ctx.applicationContext
+        prefs(app).edit().putString("clipAutoMethod", m).putBoolean("clipAccessibilityTrigger", m == "accessibility").apply()
+        EhLog.w("clip: automatic sending method $m")
+        stopRootWatch()
+        if (m != "helper" && helperRunning() && HelperStarter.granted()) { Thread { HelperStarter.stop() }.start(); helperAt = 0L }
+        if (EhState.running) { tryStartAuto(app); if (m == "helper") watchHelper(app, manual = !helperRunning()) }
+    }
+
+    /**
+     * Starts the helper through Shizuku when it should run and has not said hello. At most every 90 s, so a helper that
+     * cannot start does not loop. Returns what happened, for the Start helper button.
+     */
+    fun watchHelper(ctx: Context, manual: Boolean = false): String {
+        if (!EhState.running) return "Start EarHop first"
+        if (helperRunning() && !manual) return "The helper is running"
+        if (!manual && !wantsHelper(ctx)) return "Not needed"
+        if (!HelperStarter.shizukuInstalled(ctx)) return "Install Shizuku first"
+        if (!HelperStarter.shizukuRunning()) return "Start Shizuku first"
+        if (!HelperStarter.granted()) return "Allow EarHop in Shizuku first"
+        val now = System.currentTimeMillis()
+        if (!manual && now - helperStartedAt < 90_000) return "Starting"
+        helperStartedAt = now
+        if (!manual) EhLog.w("clip: the clipboard helper is not running, starting it")
+        return if (HelperStarter.start(ctx)) "Starting the helper" else "Could not start the helper"
     }
 
     // ---------- the clipboard helper (phone, no root) ----------
@@ -278,7 +354,8 @@ object ClipSync {
             if (rootWatching && !watchRoot) stopRootWatch() // the log watch is not needed any more
         }
         if (method != "text" && method != "big") return
-        if (!enabled(app) || !autoRoot(app) || !EhState.running || paused(app)) return
+        // Another method is chosen: the helper may still run (started by a computer), but only one method sends.
+        if (!enabled(app) || !autoRoot(app) || autoMethod(app) != "helper" || !EhState.running || paused(app)) return
         if (System.currentTimeMillis() - ownWriteAt < 2000) return // our own write of a clip that just arrived
         EhLog.w("clip: copy noticed (helper)")
         if (method == "big" || text == null) {
@@ -291,6 +368,7 @@ object ClipSync {
     }
 
     fun autoRoot(ctx: Context) = prefs(ctx).getBoolean("clipAutoRoot", true)
+    fun accessibilityCopyTrigger(ctx: Context) = autoMethod(ctx) == "accessibility"
 
     /** Without root: log access (granted once from a computer) and "Display over other apps" (Settings). */
     fun hasLogAccess(ctx: Context) = ctx.checkSelfPermission(android.Manifest.permission.READ_LOGS) == android.content.pm.PackageManager.PERMISSION_GRANTED
@@ -299,10 +377,9 @@ object ClipSync {
     /** Starts automatic sending when it is switched on and possible: with root, or with the two permissions. */
     fun tryStartAuto(ctx: Context) {
         if (rootWatching || !autoRoot(ctx) || !enabled(ctx)) return
-        when {
-            prefs(ctx).getBoolean("rootGranted", false) -> startRootWatch(ctx, root = true)
-            helperRunning() -> {} // the helper already sends every copy
-            hasLogAccess(ctx) && hasOverlay(ctx) -> startRootWatch(ctx, root = false)
+        when (autoMethod(ctx)) {
+            "root" -> if (prefs(ctx).getBoolean("rootGranted", false)) startRootWatch(ctx, root = true)
+            "helper" -> if (!helperRunning() && hasLogAccess(ctx) && hasOverlay(ctx)) startRootWatch(ctx, root = false)
         }
     }
 
@@ -395,6 +472,8 @@ object ClipSync {
     }
 
     fun stop(ctx: Context) {
+        recent.clear()
+        main.removeCallbacks(helperWatch)
         stopRootWatch()
         try { listener?.let { (ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager).removePrimaryClipChangedListener(it) } } catch (e: Exception) { }
         tcp?.stop(); gatt?.stop(); tcp = null; gatt = null
@@ -459,6 +538,8 @@ object ClipSync {
         } else {
             EhLog.w("clip: sent $what over ${links.joinToString(" and ")}")
             event("Sent ${if (kind == "text") "text" else "an image"}")
+            addRecent(ctx, Recent(System.currentTimeMillis(), true, "", kind,
+                if (kind == "text" && data.size <= 100_000) String(data, Charsets.UTF_8) else null, data.size))
             "Sent to your other devices"
         }
     }
@@ -494,6 +575,8 @@ object ClipSync {
         try { cm.setPrimaryClip(clip) } catch (e: Exception) { EhLog.w("clip: could not set the clipboard: ${e.message}"); return }
         EhLog.w("clip: received ${item.kind} from ${item.dev} over $via")
         event("Received ${if (item.kind == "text") "text" else "an image"} from ${item.dev}")
+        addRecent(ctx, Recent(System.currentTimeMillis(), false, item.dev, item.kind,
+            if (item.kind == "text" && item.data.size <= 100_000) String(item.data, Charsets.UTF_8) else null, item.data.size))
     }
 }
 
