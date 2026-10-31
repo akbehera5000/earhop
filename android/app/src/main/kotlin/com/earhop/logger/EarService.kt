@@ -25,6 +25,7 @@ class EarService : Service() {
     private var aacp: AacpClient? = null
     private var buds: BudsClient? = null
     private var a2dp: BluetoothA2dp? = null
+    private var headset: android.bluetooth.BluetoothHeadset? = null
     private var thread: Thread? = null
     @Volatile private var running = false
     private var controller: HandoffController? = null
@@ -36,11 +37,16 @@ class EarService : Service() {
     @Volatile private var useBuds = false
     @Volatile private var filter = ""
     private var lastEarbudCheck = 0L
+    private val speaker = SpeakerPolicy()
+    private var speakerRoute: SpeakerRoute? = null
+    private val speakerWorker = java.util.concurrent.Executors.newSingleThreadExecutor()
+    @Volatile private var routing = false
 
     companion object {
         const val ACTION_TAKE = "com.earhop.logger.TAKE"
         const val ACTION_RELEASE = "com.earhop.logger.RELEASE"
         const val ACTION_TEST_PAUSE = "com.earhop.logger.TEST_PAUSE"
+        const val ACTION_TEST_SPEAKER = "com.earhop.logger.TEST_SPEAKER"
     }
 
     override fun onBind(i: Intent?): IBinder? = null
@@ -49,7 +55,7 @@ class EarService : Service() {
         try {
             val filter = Earbuds.filter(this)
             val bm = getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
-            val c = Claimer(this, bm.adapter) { a2dp }
+            val c = Claimer(this, bm.adapter, { a2dp }) { headset }
             val ctl = controller
             when {
                 ctl != null -> ctl.manual(action == ACTION_TAKE)
@@ -65,6 +71,10 @@ class EarService : Service() {
         val action = intent?.action
         if (action == ACTION_TEST_PAUSE) {
             if (running) controller?.testPause()
+            return START_STICKY
+        }
+        if (action == ACTION_TEST_SPEAKER) {
+            if (running) testSpeaker()
             return START_STICKY
         }
         if (action == ACTION_TAKE || action == ACTION_RELEASE) {
@@ -111,7 +121,8 @@ class EarService : Service() {
 
         try {
             val bm = getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
-            controller = HandoffController(this, name, Claimer(this, bm.adapter) { a2dp }, filter) { isOwner(filter) }
+            controller = HandoffController(this, name, Claimer(this, bm.adapter, { a2dp }) { headset }, filter) { isOwner(filter) }
+            speakerRoute = SpeakerRoute(this, bm.adapter) { a2dp }
         } catch (e: Exception) { EhLog.w("controller failed: ${e.message}") }
 
         // Clipboard sync (Bluetooth LE and Wi-Fi).
@@ -168,6 +179,7 @@ class EarService : Service() {
                         sendStatus(st)
                     }
                     controller?.tick(playing, reading, owner, call, EhState.peers.values, AppRules.preferredPlaying(this))
+                    speakerTick(playing, reading, owner, call)
                     if (now - lastEarbudCheck >= 2000) { lastEarbudCheck = now; detectEarbuds() }
                     updateNotification()
                     if (now - lastLogAt >= 5000) {
@@ -182,6 +194,37 @@ class EarService : Service() {
         }, "earhop-loop")
         thread?.start()
         return START_STICKY
+    }
+
+    /**
+     * Speaker fallback: audio started while the connected earbuds are out of your ears plays on this device's speaker,
+     * and moves back to the earbuds when one goes back in. Runs whether or not automatic switching is on.
+     */
+    private fun speakerTick(playing: Boolean, reading: EarReading, owner: Boolean, call: Boolean) {
+        val route = speakerRoute ?: return
+        if (routing) return
+        val enabled = getSharedPreferences("earhop", MODE_PRIVATE).getBoolean("speakerFallback", true)
+        val act = speaker.update(System.currentTimeMillis(), enabled, owner, reading, playing, call)
+        EhState.onSpeaker = speaker.onSpeaker
+        if (act == null) return
+        routing = true
+        EhLog.w(if (act == SpeakerPolicy.Action.TO_SPEAKER) "speaker: audio started with the earbuds out (${reading.summary}), moving it to the speaker"
+            else "speaker: earbuds back in (${reading.summary}), moving audio back to them")
+        speakerWorker.execute {
+            val ok = try { if (act == SpeakerPolicy.Action.TO_SPEAKER) route.toSpeaker(filter) else route.toEarbuds(filter) } catch (e: Exception) { EhLog.w("speaker: error ${e.message}"); false }
+            speaker.routed(act, ok)
+            EhState.onSpeaker = speaker.onSpeaker
+            routing = false
+        }
+    }
+
+    /** Settings, Test speaker: media to the speaker for 5 seconds, then back to the earbuds. */
+    private fun testSpeaker() {
+        val route = speakerRoute ?: return
+        speakerWorker.execute {
+            EhLog.w("speaker: test, media to the speaker for 5 s")
+            if (route.toSpeaker(filter)) { Thread.sleep(5000); route.toEarbuds(filter) }
+        }
     }
 
     /** Starts the parts that belong to the active earbuds: the Galaxy Buds channel, or the AirPods scanner and channel. */
@@ -293,6 +336,10 @@ class EarService : Service() {
             override fun onServiceConnected(profile: Int, proxy: BluetoothProfile) { a2dp = proxy as BluetoothA2dp }
             override fun onServiceDisconnected(profile: Int) { a2dp = null }
         }, BluetoothProfile.A2DP)
+        bm.adapter?.getProfileProxy(this, object : BluetoothProfile.ServiceListener {
+            override fun onServiceConnected(profile: Int, proxy: BluetoothProfile) { headset = proxy as android.bluetooth.BluetoothHeadset }
+            override fun onServiceDisconnected(profile: Int) { headset = null }
+        }, BluetoothProfile.HEADSET)
     }
 
     @SuppressLint("MissingPermission")
@@ -341,6 +388,8 @@ class EarService : Service() {
     }
 
     override fun onDestroy() {
+        // Never leave media stuck on the speaker with the earbuds connected.
+        if (speaker.onSpeaker) speakerRoute?.let { r -> Thread { try { r.toEarbuds(filter) } catch (e: Exception) { } }.start() }
         running = false
         EhState.running = false
         EhState.peers.clear()

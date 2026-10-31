@@ -125,8 +125,10 @@ struct EarPolicy {
             let back = pausedFromNone ? (ear == .one || ear == .both) : ear == .both
             if back {
                 pausedAt = nil
-                // Right after our own pause key the output can still look busy, so trust the key for a few seconds.
-                let trustKey = pausedByKey && now.timeIntervalSince(at) < 3
+                // After our own pause, players such as Music keep their output open, so "playing" stays true for as
+                // long as they are paused. Trust our pause until the buds are back: the resume is an explicit play
+                // command, never a toggle, so it cannot stop audio that the user started meanwhile.
+                let trustKey = pausedByKey
                 pausedByKey = false
                 return (!playing || trustKey) ? .resume : .alreadyPlaying
             }

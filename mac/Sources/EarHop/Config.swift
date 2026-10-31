@@ -60,6 +60,8 @@ struct Config: Codable, Equatable {
     var clipHistory: Int = 10
     /// Automatic earbud switching. Off: only Take and Release move the earbuds.
     var autoSwitch: Bool = true
+    /// Audio started with the earbuds out of your ears plays on the Mac's speakers, and moves back when a bud goes in.
+    var speakerFallback: Bool = true
     /// "auto": follow the earbuds in use (connected here, or the pair the device holding them reports).
     /// "manual": keep `earbuds` as chosen.
     var earbudsMode: String = "auto"
@@ -98,7 +100,7 @@ struct Config: Codable, Equatable {
         opt(.clipSync, &base.clipSync); opt(.clipImages, &base.clipImages); opt(.clipTransport, &base.clipTransport)
         opt(.clipAuto, &base.clipAuto); opt(.clipReceive, &base.clipReceive); opt(.clipExclude, &base.clipExclude)
         opt(.clipNotify, &base.clipNotify); opt(.clipHistory, &base.clipHistory)
-        opt(.autoSwitch, &base.autoSwitch); opt(.earbudsMode, &base.earbudsMode)
+        opt(.autoSwitch, &base.autoSwitch); opt(.earbudsMode, &base.earbudsMode); opt(.speakerFallback, &base.speakerFallback)
         self = base
     }
 

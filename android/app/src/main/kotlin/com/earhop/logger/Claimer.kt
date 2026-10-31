@@ -10,7 +10,10 @@ import android.bluetooth.BluetoothDevice
  * called by reflection and may be blocked by some Android builds. Every result is logged so the
  * milestone 2 test shows what the real devices allow.
  */
-class Claimer(private val ctx: android.content.Context, private val adapter: BluetoothAdapter?, private val a2dp: () -> BluetoothA2dp?) {
+class Claimer(
+    private val ctx: android.content.Context, private val adapter: BluetoothAdapter?, private val a2dp: () -> BluetoothA2dp?,
+    private val headset: () -> android.bluetooth.BluetoothHeadset? = { null },
+) {
 
     @SuppressLint("MissingPermission")
     private fun find(filter: String): BluetoothDevice? =
@@ -54,5 +57,27 @@ class Claimer(private val ctx: android.content.Context, private val adapter: Blu
 
     /** true or false when the call ran, null when the phone blocked it and root is not in use. */
     fun take(filter: String): Boolean? = withRoot("connect", filter)
-    fun release(filter: String): Boolean? = withRoot("disconnect", filter)
+    fun release(filter: String): Boolean? {
+        val r = withRoot("disconnect", filter)
+        dropCallLink(filter)
+        return r
+    }
+
+    /**
+     * Also drops the call link (HFP). With only the music link dropped, Galaxy Buds stayed tied to this device by the
+     * call link and reconnected the music within 2 s, so the Mac or tablet could not take them. Best effort: some
+     * Android builds refuse the hidden call, which is logged and otherwise ignored.
+     */
+    @SuppressLint("MissingPermission")
+    private fun dropCallLink(filter: String) {
+        val hs = headset() ?: return
+        val dev = find(filter) ?: return
+        try {
+            if (hs.getConnectionState(dev) != android.bluetooth.BluetoothProfile.STATE_CONNECTED) return
+            val m = android.bluetooth.BluetoothHeadset::class.java.getMethod("disconnect", BluetoothDevice::class.java)
+            EhLog.w("claim: call link disconnect returned ${m.invoke(hs, dev)}")
+        } catch (e: Exception) {
+            EhLog.w("claim: call link disconnect blocked (${e.javaClass.simpleName}: ${e.cause?.message ?: e.message})")
+        }
+    }
 }

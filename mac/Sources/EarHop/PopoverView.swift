@@ -19,12 +19,30 @@ struct PopoverView: View {
         if switching { return "Switching" }
         if state.safeMode { return "Safe mode" }
         if state.inCall { return "Call" }
+        if state.owner && state.onSpeaker { return state.playing ? "On speakers" : "Ready" }
         if state.owner { return state.playing ? "Playing" : (state.phase == .ownerPausedByEarRemoval ? "Paused" : "Ready") }
         if state.playing { return "Playing here" }
         return state.holder == nil ? "Idle" : "Ready"
     }
 
+    /// Measured height of everything in the popover, so it can be as tall as its content but never taller than the screen.
+    @State private var contentHeight: CGFloat = 600
+
+    /// The tallest the popover may be: the screen's usable height (below the menu bar, above the Dock) less a margin.
+    private var maxHeight: CGFloat { max(320, (NSScreen.main?.visibleFrame.height ?? 800) - 24) }
+
     var body: some View {
+        // Scrolls when the content is taller than the screen; otherwise it is exactly as tall as the content.
+        ScrollView(.vertical, showsIndicators: contentHeight > maxHeight) {
+            content
+                .background(GeometryReader { g in Color.clear.preference(key: ContentHeightKey.self, value: g.size.height) })
+        }
+        .onPreferenceChange(ContentHeightKey.self) { contentHeight = $0 }
+        .frame(width: 360, height: min(contentHeight, maxHeight))
+        .tint(accent)
+    }
+
+    private var content: some View {
         GlassGroup {
             VStack(spacing: 12) {
                 header
@@ -41,8 +59,6 @@ struct PopoverView: View {
             }
         }
         .padding(14)
-        .frame(width: 360)
-        .tint(accent)
     }
 
     // MARK: header
@@ -102,45 +118,57 @@ struct PopoverView: View {
 
     // MARK: hero card
 
+    /// What the picture shows. Galaxy Buds report each bud and the case over their channel; AirPods give the wear state
+    /// and the levels the Mac reads.
+    private var budsModel: BudsPicture.Model {
+        var m = BudsPicture.Model(playing: state.playing, here: state.owner, stem: !state.cfg.isBuds)
+        func place(_ p: String?, _ side: Int) -> String {
+            if let p = p, p != "unknown" { return p == "disconnected" ? "unknown" : p }
+            guard state.owner else { return "unknown" }
+            switch state.ear {
+            case .both: return "wearing"
+            case .one: return side == 0 ? "wearing" : "idle"
+            case .none: return "idle"
+            case .unknown: return "unknown"
+            }
+        }
+        if state.cfg.isBuds {
+            let b = state.buds, live = state.budsConnected && state.owner
+            m.left = .init(battery: live ? b.battL : -1, place: place(live ? b.placeL : nil, 0), charging: live && b.chargeL)
+            m.right = .init(battery: live ? b.battR : -1, place: place(live ? b.placeR : nil, 1), charging: live && b.chargeR)
+            m.caseLevel = live ? b.battCase : -1
+            m.caseCharging = live && b.chargeCase
+        } else {
+            m.left = .init(battery: state.battery?.0 ?? -1, place: place(nil, 0))
+            m.right = .init(battery: state.battery?.1 ?? -1, place: place(nil, 1))
+            m.caseLevel = state.caseBattery ?? -1
+        }
+        return m
+    }
+
     private var hero: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 14) {
-                ZStack {
-                    Circle().fill(accent.opacity(state.owner ? 0.22 : 0.08)).frame(width: 64, height: 64)
-                    if switching {
-                        ProgressView().controlSize(.large).tint(accent)
-                    } else {
-                        Image(systemName: state.cfg.isBuds ? "earbuds" : "airpodspro")
-                            .font(.system(size: 30, weight: .regular))
-                            .symbolRenderingMode(.hierarchical)
-                            .foregroundStyle(state.owner ? accent : .secondary)
-                    }
-                }
-                .accessibilityHidden(true)
-                VStack(alignment: .leading, spacing: 3) {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: 2) {
                     Text(state.cfg.isBuds ? "Galaxy Buds2 Pro" : "AirPods Pro 2").font(.headline)
                     Text(whereText).font(.subheadline).foregroundStyle(.secondary)
-                    Text(stateWord)
-                        .font(.system(.title2, design: .rounded).weight(.semibold))
-                        .foregroundStyle(state.safeMode ? .orange : (state.owner || switching ? accent : .primary))
-                        .contentTransition(.opacity)
                 }
-                Spacer(minLength: 0)
+                Spacer(minLength: 8)
+                Text(stateWord)
+                    .font(.system(.title3, design: .rounded).weight(.semibold))
+                    .foregroundStyle(state.safeMode ? .orange : (state.owner || switching ? accent : .primary))
+                    .contentTransition(.opacity)
             }
             .accessibilityElement(children: .combine)
             .accessibilityLabel("\(state.cfg.earbudsName), \(whereText), \(stateWord)")
+
+            BudsPicture(model: budsModel, tint: accent)
 
             if switching { stages }
             if let f = state.lastFailure, !switching {
                 note("exclamationmark.circle.fill", .orange, "Last switch failed: \(f).")
             } else if let h = state.holdReason, !state.owner, !switching {
                 note("pause.circle", .secondary, "Not switching: \(h).")
-            }
-
-            HStack(spacing: 8) {
-                chip(state.ear.symbol, state.ear.label, tint: state.ear == .none ? .orange : nil)
-                batteryChips
-                Spacer(minLength: 0)
             }
         }
         .padding(14)
@@ -165,21 +193,6 @@ struct PopoverView: View {
         .accessibilityLabel("Switching, step \(current + 1) of 4, \(state.stage ?? "")")
     }
 
-    @ViewBuilder private var batteryChips: some View {
-        if state.cfg.isBuds {
-            let b = state.buds
-            if state.budsConnected, b.battL >= 0 || b.battR >= 0 {
-                chip("battery.75percent", "L \(pct(b.battL)) R \(pct(b.battR))", tint: low(b.battL, b.battR) ? .red : nil)
-                if b.battCase >= 0 { chip("earbuds.case", pct(b.battCase), tint: b.battCase <= 20 ? .red : nil) }
-            }
-        } else if let b = state.battery {
-            chip("battery.75percent", "L \(b.0)% R \(b.1)%", tint: min(b.0, b.1) <= 20 ? .red : nil)
-            if let c = state.caseBattery { chip("airpodspro.chargingcase.wireless", "\(c)%", tint: c <= 20 ? .red : nil) }
-        }
-    }
-
-    private func pct(_ v: Int) -> String { v >= 0 ? "\(v)%" : "-" }
-    private func low(_ a: Int, _ b: Int) -> Bool { min(a < 0 ? 100 : a, b < 0 ? 100 : b) <= 20 }
 
     private func noisePicker(_ link: BudsWear) -> some View {
         Picker("Noise control", selection: Binding(get: { state.buds.noise }, set: { link.setNoise($0) })) {
@@ -385,4 +398,9 @@ enum DeviceName {
     static func symbol(_ n: String) -> String {
         switch n { case "phone": return "iphone"; case "tab": return "ipad.landscape"; default: return "laptopcomputer" }
     }
+}
+
+private struct ContentHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
 }

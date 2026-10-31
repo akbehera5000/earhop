@@ -24,6 +24,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let startedAt = Date()
     var probing = false
     let budsWear = BudsWear()
+    var speaker = SpeakerPolicy()
     var clip: ClipSync!
     var clipPolledAt = Date.distantPast
     let pathMonitor = NWPathMonitor()
@@ -234,12 +235,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Automatic earbuds: the pair connected to this Mac, else the pair the device holding the earbuds reports, else no
     /// change. Switching goes through the normal settings path, the same as picking it in the popover.
+    /// Speaker fallback (see SpeakerPolicy): runs whether or not automatic switching is on.
+    func speakerTick(playing: Bool, reading: EarReading, owner: Bool, inCall: Bool) {
+        let act = speaker.update(now: Date(), enabled: state.cfg.speakerFallback, owner: owner, ear: reading, playing: playing, call: inCall,
+                                 earPaused: controller.phase == .ownerPausedByEarRemoval)
+        if let act = act {
+            Log.write(act == .toSpeaker ? "speaker: earbuds out (\(reading.summary)), sound output to the speakers"
+                                        : "speaker: earbuds back in (\(reading.summary)), moving the sound back to them")
+            let ok = act == .toSpeaker ? OutputRoute.toSpeakers() : OutputRoute.toEarbuds(state.cfg.activeAddress)
+            speaker.routed(act, ok: ok)
+        }
+        if state.onSpeaker != speaker.onSpeaker { state.onSpeaker = speaker.onSpeaker }
+    }
+
+    /// Never leave the sound on the speakers with the earbuds connected when EarHop quits.
+    func applicationWillTerminate(_ n: Notification) {
+        if speaker.onSpeaker { _ = OutputRoute.toEarbuds(state.cfg.activeAddress) }
+    }
+
     func detectEarbuds() {
         let c = state.cfg
         guard c.earbudsMode == "auto" else { return }
         func connected(_ address: String) -> Bool {
-            guard !address.isEmpty, let d = IOBluetoothDevice(addressString: address) else { return false }
-            return d.isConnected()
+            BlueUtil(path: "", address: address).fastConnected() ?? false
         }
         let want: String
         if connected(c.budsAddress) { want = "buds" }
@@ -290,6 +308,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if state.budsStatus != budsWear.status { state.budsStatus = budsWear.status }
 
         ears?.setGentle(state.cfg.gentleScan && owner && playing)
+        // Speaker fallback first, so when a bud goes back in the sound is on the earbuds before the resume key is sent.
+        speakerTick(playing: playing, reading: reading, owner: owner, inCall: inCall)
         controller.tick(playing: playing, ear: reading, owner: owner, inCall: inCall)
         if state.phase != controller.phase { state.phase = controller.phase }
         if state.holdReason != controller.holdReason { state.holdReason = controller.holdReason }
@@ -602,6 +622,37 @@ if CommandLine.arguments.contains("--selftest") {
     check("wrong secret is reported", Proto.rejection(sec, secret: "other", nowMs: now).map { $0.dev == "phone" && $0.reason == "secret" } == true)
     check("clock skew is reported", Proto.rejection(sec, secret: "k", nowMs: now + 60000).map { $0.reason == "clock" } == true)
     check("junk is not reported", Proto.rejection(Data("hello".utf8), secret: "k", nowMs: now) == nil)
+
+    // Speaker fallback: a start with the earbuds out goes to the speakers, a bud back in returns it; nothing else moves.
+    func ears(_ e: Ear) -> EarReading { EarReading(ear: e, source: "buds-rfcomm", confidence: .high) }
+    var sp = SpeakerPolicy()
+    var st = Date()
+    func spStep(_ e: Ear, _ playing: Bool, owner: Bool = true, enabled: Bool = true, call: Bool = false, dt: Double = 0.25) -> SpeakerPolicy.Action? {
+        st = st.addingTimeInterval(dt)
+        return sp.update(now: st, enabled: enabled, owner: owner, ear: ears(e), playing: playing, call: call)
+    }
+    for _ in 0 ..< 8 { _ = spStep(.both, true) }
+    check("speaker: playing when taken out is not moved before the pause", (0 ..< 8).allSatisfy { _ in spStep(.none, true) == nil })
+    var sp2 = SpeakerPolicy()
+    var t2 = Date()
+    for _ in 0 ..< 4 { t2 += 0.25; _ = sp2.update(now: t2, enabled: true, owner: true, ear: ears(.both), playing: true, call: false) }
+    t2 += 0.25; let first = sp2.update(now: t2, enabled: true, owner: true, ear: ears(.none), playing: true, call: false, earPaused: true)
+    t2 += 1.2; let later = sp2.update(now: t2, enabled: true, owner: true, ear: ears(.none), playing: true, call: false, earPaused: true)
+    check("speaker: after the ear pause the output moves while silent", first == nil && later == .toSpeaker)
+    for _ in 0 ..< 8 { _ = spStep(.none, false) }
+    check("speaker: start with buds out goes to speakers", spStep(.none, true) == .toSpeaker)
+    sp.routed(.toSpeaker, ok: true)
+    check("speaker: stays while out", spStep(.none, true) == nil && sp.onSpeaker)
+    check("speaker: bud back in returns", spStep(.one, true) == .toEarbuds)
+    sp.routed(.toEarbuds, ok: true)
+    check("speaker: back on earbuds", !sp.onSpeaker && spStep(.both, true) == nil)
+    sp = SpeakerPolicy()
+    for _ in 0 ..< 8 { _ = spStep(.none, false) }
+    check("speaker: off does nothing", spStep(.none, true, enabled: false) == nil)
+    _ = spStep(.none, false)
+    check("speaker: calls do nothing", spStep(.none, true, call: true) == nil)
+    _ = spStep(.none, false)
+    check("speaker: other device's earbuds do nothing", spStep(.none, true, owner: false) == nil)
 
     print(failed.isEmpty ? "selftest OK" : "selftest FAILED: \(failed.joined(separator: ", "))")
     exit(failed.isEmpty ? 0 : 1)

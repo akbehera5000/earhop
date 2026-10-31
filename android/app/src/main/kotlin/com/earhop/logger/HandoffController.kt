@@ -34,6 +34,9 @@ class HandoffController(
         core.settings.priority = RuleStore.priority(ctx)
         core.settings.requireEar = prefs.getBoolean("requireEar", false)
         core.settings.pauseWhenOneOut = prefs.getBoolean("pauseOnOne", true)
+        // With speaker fallback the earbuds stay connected while they are out, so putting them back in is noticed and
+        // the sound can move back to them; otherwise this device lets go of them after 2 minutes out.
+        core.settings.releaseAfterOutMs = if (prefs.getBoolean("speakerFallback", true)) Long.MAX_VALUE / 4 else 120_000L
         // A full second of steady playback before switching: reliability over speed.
         core.settings.minPlayMs = if (fast) 300L else 1000L
         core.settings.live = true

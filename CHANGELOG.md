@@ -1,5 +1,80 @@
 # Changelog
 
+## 2026-10-31, speaker fallback (Mac and Android 1.2.4)
+
+* New on both: with the earbuds connected but out of your ears, audio you start plays on the device's own speakers, and
+  moves back to the earbuds, without stopping, as soon as you put one in. Audio already playing when you take the
+  earbuds out is still paused (not moved). Calls are left alone. On by default: "Use the speaker(s) when earbuds are
+  out" (Android: Buds, In-ear detection; Mac: Settings). With it on, a device keeps the earbuds while they are out
+  instead of letting go after 2 minutes, so it notices when you put them back in.
+* Mac: switches the system sound output between the built-in speakers and the earbuds (CoreAudio); the popover says
+  "On speakers". Switches back to the earbuds if EarHop quits while on the speakers. Tested: out and back on this Mac.
+* Android: changes the active audio device through the hidden A2DP call (none = speaker, the earbuds = back); root is
+  the last resort when switched on. Confirmed by reading where the music stream plays. Tested on the phone: music
+  went bt_a2dp -> speaker -> bt_a2dp. Buds, In-ear detection has "Test speaker (5 seconds)". The card says "playing on
+  the speaker" while it is.
+* Unit tests (SpeakerPolicyTest, 6 cases) and Mac self test cases for the rules.
+* Fixed (Mac): speaker fallback never switched. After EarHop's pause, Music and other players keep their output open, so
+  the Mac still saw "playing" and never noticed you pressing play again. The Mac now moves the output to the speakers
+  while it is silent, once EarHop has paused because both buds came out, so the next play is heard there; when a bud
+  goes back in, the output returns to the earbuds before the resume command is sent.
+* Fixed (Mac): putting the buds back in more than 3 s after the pause did not resume ("audio is already playing"), for
+  the same reason. The Mac trusts its own pause until the buds are back; the resume is an explicit play command, never a
+  toggle.
+* Mac version is now 1.2.4 (was still 1.0.0); dist/EarHop-1.2.4.dmg and dist/earhop new.apk (1.2.4) built.
+
+## 2026-10-31, Mac: live earbuds picture on the main card; Android 1.2.3
+
+* Mac: the main card shows the same live picture as the phone (BudsPicture.swift): both buds and the case, worn buds
+  floating with sound waves while playing here, buds in the case sitting in it, a battery ring and level per bud, the
+  case level, and a bolt while charging. Uses the accent colour for rings and waves; Reduce Motion turns off bobbing
+  and waves. It replaces the icon and the battery chips.
+* Mac: the menu bar popover never grows past the screen: it is as tall as its content up to the screen's usable height,
+  and scrolls beyond that (it used to run off the bottom with Diagnostics and the footer out of reach).
+* Both: the lid stays closed when no bud is known to be out, and the levels of buds in the case sit beside the case
+  instead of over the open lid.
+
+## 2026-10-31, Mac: claims of Galaxy Buds no longer fail; Android 1.2.2: letting go drops the call link too
+
+* Fixed (Mac): claiming Galaxy Buds always "failed" with "the Buds did not accept the connection", although macOS had
+  connected them (its Bluetooth log showed HFP, AVRCP and A2DP up). On this macOS IOBluetooth's isConnected() kept
+  answering false for the Buds, for the device made from the address and for the one from the paired list. The
+  connection check now also looks for the earbuds' Bluetooth audio device in CoreAudio (its ID carries the address).
+  Tested: the Mac took the Buds from the tablet and from the phone, opened the wear channel and read the batteries.
+  The Mac's wear channel retries after 2, 4, 8 and then every 15 s instead of up to a minute.
+* Android: letting go now also disconnects the call link (HFP), best effort. With only the music link dropped the
+  Buds stayed tied to the phone and came back to it within 2 s (seen when the tablet tried to take them).
+
+## 2026-10-31, Android 1.2.1: switching and Buds controls fixed, live earbuds picture
+
+* Fixed: on Galaxy Buds the wear state turned "unknown" 2 minutes after the Buds last reported, although the channel was
+  open and the Buds were in your ears (they only report on a change). Unknown wear broke automatic switching and
+  pause/resume. While the channel is open the last report now stays valid.
+* Fixed: noise control, touch controls, equalizer and battery disappeared for long stretches. The wear channel retried
+  only every minute after a refusal and its connect could hang; it now retries after 2, 4, 8 and then every 15 s, and a
+  connect that hangs is ended after 12 s. Battery levels stay shown while the channel is open (they used to vanish after
+  a minute without change).
+* New: the earbuds card shows a live picture of both buds and the case. Worn buds float and bob, with sound waves while
+  playing; buds in the case sit in it; buds that are out rest beside it. Each bud has a battery ring and level, the
+  case shows its level, and charging shows a bolt.
+
+## 2026-10-31, Android 1.2.0: new look, production build
+
+* New design language: an AMOLED black page with a faint dot grid, dark graphite cards, and glowing colour cards for
+  what matters most (the earbuds card glows magenta while the earbuds are here, indigo while they are elsewhere, violet
+  while switching; Switching and Clipboard tiles glow indigo and ember when on). Battery levels in dot-matrix digits with
+  dotted level bars. Centred page titles between round buttons, white pill buttons, pill switches.
+* Colours are decoration only: on and off states are shown by outlines, green for on and red-grey for off (switches,
+  tiles, the Running chip, the earbuds state pill, status rings). The accent colour setting was removed.
+* Production app instead of a debug build: a release APK signed with EarHop's own key, shrunk with R8 (432 KB instead
+  of 1.4 MB), not debuggable. Debug output moved out of sight: raw readings, the self test and Copy diagnostics are in
+  Settings, Advanced; the log and decisions are in Activity, Technical log; a crash shows a short note with Copy report
+  instead of the stack trace; in-ear status is described in words; the computer setup for the clipboard helper is folded.
+* New: Settings, Backup: Export and Import of all EarHop settings as a file (root permission is not carried over).
+* Activity has a Timeline of every switch with its reason. Home's left round button shares the clipboard.
+* One-time step: the release key differs from the debug key, so Android will not update the old build in place.
+  Export the settings (or keep them with adb, see README), uninstall the old EarHop, install the new one, Import.
+
 ## 2026-10-29, Android redesign, one clipboard method at a time
 
 * Fixed: the Accessibility setup said On while the service was off in Android settings. The status now needs the

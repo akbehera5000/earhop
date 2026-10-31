@@ -1,5 +1,6 @@
 import Foundation
 import IOBluetooth
+import CoreAudio
 
 /// Connects and disconnects the earbuds. Everything runs inside the app through macOS Bluetooth (IOBluetooth); the
 /// Homebrew tool blueutil is optional and only used as a second try when it is installed.
@@ -25,11 +26,65 @@ struct BlueUtil {
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    /// Instant connection check through IOBluetooth (no process spawn). nil if the device is unknown.
+    /// Instant connection check (no process spawn). nil if the device is unknown.
+    /// IOBluetooth's isConnected() can keep answering "not connected" after macOS connected the earbuds (seen with
+    /// Galaxy Buds: macOS's Bluetooth log showed HFP, AVRCP and A2DP up while both the address lookup and the paired list
+    /// said false, so every claim "failed"). The earbuds' audio device in CoreAudio, whose ID carries the Bluetooth
+    /// address, is the dependable sign, so it counts too. Any one saying connected counts.
     func fastConnected() -> Bool? {
         guard !address.isEmpty, let d = IOBluetoothDevice(addressString: address) else { return nil }
-        return d.isConnected()
+        if d.isConnected() { return true }
+        if BlueUtil.pairedDevice(address)?.isConnected() ?? false { return true }
+        let audio = BlueUtil.audioConnected(address)
+        if audio != BlueUtil.lastAudioOnly {
+            BlueUtil.lastAudioOnly = audio
+            if audio { Log.write("connect: IOBluetooth says not connected but the earbuds' audio device is present; counting them as connected") }
+        }
+        return audio
     }
+
+    private static var lastAudioOnly = false
+
+    /// True when CoreAudio lists a Bluetooth audio device for this address (present exactly while its audio is connected).
+    static func audioConnected(_ address: String) -> Bool {
+        let want = address.lowercased().filter { $0.isHexDigit }
+        guard want.count == 12 else { return false }
+        var a = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDevices, mScope: kAudioObjectPropertyScopeGlobal,
+                                           mElement: kAudioObjectPropertyElementMain)
+        var size: UInt32 = 0
+        guard AudioObjectGetPropertyDataSize(AudioObjectID(kAudioObjectSystemObject), &a, 0, nil, &size) == noErr, size > 0 else { return false }
+        var ids = [AudioDeviceID](repeating: 0, count: Int(size) / MemoryLayout<AudioDeviceID>.size)
+        guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &a, 0, nil, &size, &ids) == noErr else { return false }
+        for id in ids {
+            var tp = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyTransportType, mScope: kAudioObjectPropertyScopeGlobal,
+                                                mElement: kAudioObjectPropertyElementMain)
+            var transport: UInt32 = 0
+            var tz = UInt32(MemoryLayout<UInt32>.size)
+            guard AudioObjectGetPropertyData(id, &tp, 0, nil, &tz, &transport) == noErr,
+                  transport == kAudioDeviceTransportTypeBluetooth || transport == kAudioDeviceTransportTypeBluetoothLE else { continue }
+            var up = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyDeviceUID, mScope: kAudioObjectPropertyScopeGlobal,
+                                                mElement: kAudioObjectPropertyElementMain)
+            var uid: Unmanaged<CFString>?
+            var uz = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
+            guard AudioObjectGetPropertyData(id, &up, 0, nil, &uz, &uid) == noErr, let s = uid?.takeRetainedValue() as String? else { continue }
+            if s.lowercased().filter({ $0.isHexDigit }).contains(want) { return true }
+        }
+        return false
+    }
+    private static var pairedCache: (at: Date, list: [IOBluetoothDevice]) = (.distantPast, [])
+    private static let cacheLock = NSLock()
+
+    /// The paired device with this address, from a list refreshed at most twice a second.
+    static func pairedDevice(_ address: String) -> IOBluetoothDevice? {
+        let want = normalize(address)
+        cacheLock.lock(); defer { cacheLock.unlock() }
+        if Date().timeIntervalSince(pairedCache.at) > 0.5 {
+            pairedCache = (Date(), (IOBluetoothDevice.pairedDevices() as? [IOBluetoothDevice]) ?? [])
+        }
+        return pairedCache.list.first { normalize($0.addressString ?? "") == want }
+    }
+
+    static func normalize(_ a: String) -> String { a.lowercased().replacingOccurrences(of: ":", with: "-") }
 
     func isConnected() -> Bool { fastConnected() ?? (hasTool && run(["--is-connected", address]) == "1") }
     func connect() { Log.write("blueutil connect: \(run(["--connect", address]) ?? "failed")") }
@@ -105,6 +160,8 @@ struct BlueUtil {
 final class ConnectWaiter: NSObject {
     static let shared = ConnectWaiter()
     @objc func connectionComplete(_ device: IOBluetoothDevice!, status: IOReturn) {
-        Log.write("connect: macOS finished connecting (status \(status))")
+        let addr = device?.addressString ?? ""
+        Log.write("connect: macOS finished connecting (status \(status)), IOBluetooth says \(device?.isConnected() ?? false), " +
+            "audio device \(BlueUtil.audioConnected(addr) ? "present" : "not yet")")
     }
 }

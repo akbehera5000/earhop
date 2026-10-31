@@ -29,6 +29,8 @@ final class AppState: ObservableObject {
     /// Device names used by two devices at once, with when it was last seen.
     @Published var duplicates: [String: Date] = [:]
     @Published var inCall = false
+    /// True while EarHop has moved the sound to the Mac's speakers because the earbuds are out (speaker fallback).
+    @Published var onSpeaker = false
     @Published var playingApps: [String] = []
     @Published var battery: (Int, Int)?
     @Published var caseBattery: Int?

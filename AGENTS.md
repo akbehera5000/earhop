@@ -144,7 +144,8 @@ Mac specifics worth knowing:
 | `EhLog.kt` | Log (memory plus rotated file), `EhState` (live state shared by service and UI), `PeerState`. |
 | `HelperStarter.kt` | Starts and stops the clipboard helper through Shizuku (`newProcess` by reflection, shell uid only). |
 | `ClipAccessibilityService.kt` | Optional copy trigger (method "accessibility"): copy confirmations and System UI's clipboard preview open `ClipActivity`. `state()` is on only while the service is bound. |
-| `Glass.kt` | Liquid Glass style drawables and palette: page background, glass surfaces, buttons, segmented track, tab bar, header. |
+| `Glass.kt` | The look: dot grid page, graphite cards (`surface`), glowing colour cards (`aurora`, `hero`), white pill buttons, state outlines (`statePill`, `switchTrack`, `knob`, `dot`), tab bar, header. |
+| `DotViews.kt` | `DotText` (dot-matrix digits for battery levels) and `DotBar` (dotted level bar). |
 | `MainActivity.kt` | Whole UI built in code: six pages (Home, Buds, Clipboard, Devices, Settings, Activity), a glass tab bar with a sliding highlight and a header that appears on scroll; `card(title, footer)` makes a glass section (hiding the body hides the section); `switchRow()` and `segmented()` stay in sync through `syncs`; parts that list things rebuild only when their signature changes (`*Sig`), never every second. |
 | `Tiles.kt` | Quick settings tiles Take, Release, Auto switching and Noise control with live state; `Tiles.refreshAll`; `TileActions` (routes through the controller when the service runs). |
 | `NotifUi.kt` | The ongoing notification (custom collapsed and expanded layouts `notif_compact.xml`, `notif_expanded.xml`): status, battery bars, noise pills, Take or Release, Auto. Buttons go to `EarActionReceiver`. |
@@ -243,8 +244,8 @@ bash build_app.sh                                  # install into /Applications
 
 cd android
 export JAVA_HOME=/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home
-./gradlew assembleDebug testDebugUnitTest
-cp app/build/outputs/apk/debug/app-debug.apk "../dist/earhop new.apk"
+./gradlew assembleRelease testDebugUnitTest      # release: R8, signed from ~/.earhop/android-signing.properties
+cp app/build/outputs/apk/release/app-release.apk "../dist/earhop new.apk"
 ```
 
 Current automated coverage: the Mac self test (protocol vectors, packet security, BLE payload, Buds frame fixtures,
@@ -333,6 +334,12 @@ Tooling notes:
     the service off (seen on 2026-10-29): after every install, the owner has to turn it on again. The app cannot open the
     service's own settings page (OPEN_ACCESSIBILITY_DETAILS_SETTINGS is system only); it opens Accessibility scrolled to it.
 
+24. **The Android app ships as a release build.** Never remove `-keep class com.earhop.logger.**` from
+    `proguard-rules.pro`: `app_process` starts `RootBt` and `ClipHelper` by class name and several classes use
+    reflection, so renamed classes break root switching and the clipboard helper without any build error. Sign only with
+    the key from `~/.earhop/android-signing.properties`; never commit the key or its passwords, and never sign a
+    release with another key, because every device would have to uninstall (and lose its settings) to update.
+
 ## 10. Working rules from the owner
 
 * No em dashes anywhere, in chat or in files. Use commas, colons or full stops.
@@ -357,6 +364,6 @@ Tooling notes:
 * Galaxy Buds controls (noise, equalizer, spatial audio, touch lock, Find My Buds) are untested on the real Buds.
 * The Buds frame offsets were never compared against GalaxyBudsClient or captured frames.
 * The Mac app is signed with a local certificate, not a Developer ID, so it is not notarized.
-* Android is `1.1.0` (versionCode 6); the Mac is `1.0.0`.
+* Android is `1.2.0` (versionCode 7, release build); the Mac is `1.0.0`.
 * Shizuku start on boot and the automatic helper restart are not yet confirmed after a real phone restart.
 * Language support is not implemented.

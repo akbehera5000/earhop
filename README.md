@@ -45,10 +45,18 @@ Android (needs JDK 17 and the Android SDK):
 ```bash
 cd android
 export JAVA_HOME=/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home
-./gradlew assembleDebug testDebugUnitTest
+./gradlew assembleRelease testDebugUnitTest
 ```
 
-Install `android/app/build/outputs/apk/debug/app-debug.apk` (also copied to `dist/earhop new.apk`) on the phone and the tablet.
+Install `android/app/build/outputs/apk/release/app-release.apk` (also copied to `dist/earhop new.apk`) on the phone and
+the tablet. The release build is signed with the key in `~/.earhop/earhop-release.jks`, configured in
+`~/.earhop/android-signing.properties` (storeFile, storePassword, keyAlias, keyPassword). Neither is in the repository;
+back them up, because updates must be signed with the same key. Without that file the release APK is unsigned;
+`./gradlew assembleDebug` still makes a debug build for development.
+
+Moving from a debug build to the release build (or between two keys) needs one uninstall, which erases EarHop's
+settings on that device. Before uninstalling, open Settings, Backup, Export; after installing the new APK, Import the
+file, then delete it (it holds the pairing secret). Root permission and the accessibility service must be allowed again.
 
 All tests at once: `bash tests/run.sh`.
 

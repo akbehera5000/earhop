@@ -40,13 +40,15 @@ class BudsClient(private val ctx: Context, private val filter: () -> String, pri
 
     /**
      * Wear state with its source: live from the channel (high), the last report for 20 s after the channel closed
-     * (low, never pauses or resumes), or unknown.
+     * (low, never pauses or resumes), or unknown. The Buds only report placement when it changes, so while the channel
+     * is open the last report stays true however old it is (it used to expire after 2 minutes of sitting still, which
+     * turned the wear state "unknown" and broke switching).
      */
     fun reading(): EarReading {
         val now = System.currentTimeMillis()
         val e = synchronized(lock) { st.ear }
-        if (socket != null && at != 0L && now - at < 120_000) return EarReading(e, "buds-rfcomm", "high")
-        if (at != 0L && closedAt != 0L && now - closedAt < 20_000 && closedAt - at < 120_000) return EarReading(e, "last-known", "low")
+        if (socket != null && at != 0L) return EarReading(e, "buds-rfcomm", "high")
+        if (at != 0L && closedAt != 0L && now - closedAt < 20_000) return EarReading(e, "last-known", "low")
         return EarReading.UNKNOWN
     }
 
@@ -149,18 +151,25 @@ class BudsClient(private val ctx: Context, private val filter: () -> String, pri
         val adapter = BluetoothAdapter.getDefaultAdapter()
         while (running) {
             try {
-                if (!isOwner()) { if (socket != null) close(); failures = 0; Thread.sleep(1500); continue }
+                if (!isOwner()) { if (socket != null) close(); failures = 0; Thread.sleep(1000); continue }
                 if (System.currentTimeMillis() < holdUntil) { Thread.sleep(500); continue }
                 if (socket == null) {
-                    // Exponential back off (2, 4, 8 ... 60 s) so a refused channel never becomes a busy loop.
-                    val wait = minOf(60_000L, 2000L shl minOf(failures, 5))
+                    // Back off 2, 4, 8, 15 s so a refused channel never becomes a busy loop, but the controls come back
+                    // quickly once Galaxy Wearable or Quick connect lets go (it used to wait up to a minute).
+                    val wait = minOf(15_000L, 2000L shl minOf(failures, 3))
                     val dev = adapter?.bondedDevices?.firstOrNull { it.name?.contains(filter(), true) == true }
                     if (dev == null) { EhState.buds = "no paired Buds"; Thread.sleep(wait); continue }
                     EhState.buds = "connecting"
                     try {
                         adapter.cancelDiscovery()
                         val s = dev.createRfcommSocketToServiceRecord(UUID.fromString(BudsProtocol.SERVICE_UUID))
-                        s.connect()
+                        // connect() has no timeout of its own and can hang while the Buds are busy switching; closing
+                        // the socket from a watchdog ends it so the loop can try again.
+                        val watchdog = Thread({
+                            try { Thread.sleep(12_000); EhLog.w("buds: wear channel connect timed out"); s.close() } catch (e: InterruptedException) { } catch (e: Exception) { }
+                        }, "earhop-buds-watchdog").also { it.isDaemon = true; it.start() }
+                        try { s.connect() } finally { watchdog.interrupt() }
+                        at = 0L
                         socket = s
                         failures = 0
                         EhState.buds = "connected"
@@ -169,7 +178,7 @@ class BudsClient(private val ctx: Context, private val filter: () -> String, pri
                         failures++
                         EhState.buds = "refused (${e.message ?: e.javaClass.simpleName})" +
                             if (failures >= 3) ", Galaxy Wearable may hold the channel" else ""
-                        if (failures == 1 || failures % 5 == 0) EhLog.w("buds: wear channel failed ($failures, next try in ${wait / 1000} s): ${e.message}")
+                        if (failures <= 2 || failures % 10 == 0) EhLog.w("buds: wear channel failed ($failures, next try in ${wait / 1000} s): ${e.message}")
                         Thread.sleep(wait)
                         continue
                     }

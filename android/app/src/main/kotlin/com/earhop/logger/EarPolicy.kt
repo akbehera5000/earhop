@@ -72,3 +72,38 @@ object BeaconPick {
         return sources.filter { it.second >= top - 8 }.minOfOrNull { it.first }
     }
 }
+
+/**
+ * Speaker fallback, free of Android classes so it can be unit tested. With the earbuds connected but out of your ears,
+ * audio that you start sends the sound to this device's own speaker; putting a bud back in sends it to the earbuds
+ * again, without stopping playback. Only a start while the buds are out counts: audio that was already playing when
+ * they came out is paused by EarPolicy, not moved.
+ */
+class SpeakerPolicy {
+    enum class Action { TO_SPEAKER, TO_EARBUDS }
+
+    /** True while EarHop has sent the sound to the speaker. */
+    var onSpeaker = false; private set
+    private var wasPlaying = false
+    private var outSince = 0L
+
+    /** Records what the service did: a route that failed leaves the sound where it was. */
+    @Synchronized fun routed(action: Action, ok: Boolean) {
+        onSpeaker = when (action) { Action.TO_SPEAKER -> ok; Action.TO_EARBUDS -> !ok && onSpeaker }
+    }
+
+    @Synchronized fun update(now: Long, enabled: Boolean, owner: Boolean, ear: EarReading, playing: Boolean, call: Boolean): Action? {
+        val out = ear.trusted && ear.ear == "none"
+        val inEar = ear.trusted && (ear.ear == "both" || ear.ear == "one")
+        if (out) { if (outSince == 0L) outSince = now } else if (ear.ear != "unknown") outSince = 0L
+        val started = playing && !wasPlaying
+        wasPlaying = playing
+        if (onSpeaker) {
+            // The earbuds left this device: the sound is on the speaker anyway, nothing to undo.
+            if (!owner) { onSpeaker = false; return null }
+            return if (inEar || !enabled) Action.TO_EARBUDS else null
+        }
+        // Out for at least 1.5 s, so the pause after taking them out is never mistaken for a new start.
+        return if (enabled && owner && !call && out && started && now - outSince >= 1500) Action.TO_SPEAKER else null
+    }
+}

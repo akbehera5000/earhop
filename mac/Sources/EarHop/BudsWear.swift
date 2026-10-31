@@ -215,12 +215,13 @@ final class BudsWear: NSObject, IOBluetoothRFCOMMChannelDelegate {
         failures += 1
         status = "refused (\(why))"
         if failures == 1 || failures % 5 == 0 { Log.write("buds: wear channel failed: \(why)") }
-        // Exponential back off (2, 4, 8 ... 60 s) so a refused channel never becomes a busy loop.
-        nextTryAt = Date().addingTimeInterval(min(60, 2 * pow(2, Double(min(failures - 1, 5)))))
+        // Back off 2, 4, 8, 15 s so a refused channel never becomes a busy loop but comes back soon.
+        nextTryAt = Date().addingTimeInterval(min(15, 2 * pow(2, Double(min(failures - 1, 3)))))
     }
 
     private func connect() {
-        guard let dev = IOBluetoothDevice(addressString: address), dev.isConnected() else { return }
+        // IOBluetooth's own isConnected() can miss a connected pair, so ask the same check the claims use.
+        guard let dev = IOBluetoothDevice(addressString: address), BlueUtil(path: "", address: address).fastConnected() == true else { return }
         connecting = true
         status = "connecting"
         let uuid = IOBluetoothSDPUUID(bytes: uuidBytes, length: 16)

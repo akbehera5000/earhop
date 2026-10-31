@@ -71,6 +71,8 @@ object EhState {
     @Volatile var playing = false
     @Volatile var owner = false
     @Volatile var call = false
+    /** True while EarHop has moved media to this device's speaker because the earbuds are out (speaker fallback). */
+    @Volatile var onSpeaker = false
     @Volatile var error: String? = null
     @Volatile var beaconAt = 0L
     @Volatile var beaconInfo = ""

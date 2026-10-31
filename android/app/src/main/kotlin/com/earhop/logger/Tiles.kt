@@ -64,7 +64,7 @@ object TileActions {
             var ok = false
             try {
                 withProxy(ctx) { adapter, p ->
-                    val c = Claimer(ctx, adapter) { p }
+                    val c = Claimer(ctx, adapter, { p })
                     EhLog.w("handoff: manual ${if (take) "take" else "release"} from tile")
                     ok = (if (take) c.take(filter(ctx)) else c.release(filter(ctx))) == true
                     EhState.record(if (take) "claim" else "release", "manual tile")

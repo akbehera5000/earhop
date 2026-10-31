@@ -586,6 +586,10 @@ private struct ConnectionPage: View {
                 Toggle("Automatic switching", isOn: $state.cfg.autoSwitch)
                 Toggle("Calls take the earbuds", isOn: $state.cfg.detectCalls)
                 Toggle("Pause when an earbud comes out", isOn: $state.cfg.pauseWhenOneOut)
+                Toggle(isOn: $state.cfg.speakerFallback) {
+                    Text("Use the speakers when earbuds are out")
+                    Text("Audio you start with the earbuds out of your ears plays on the Mac's speakers, and moves back to the earbuds when you put one in. Keeps the earbuds connected while they are out.")
+                }
                 LabeledContent("Pause") {
                     HStack {
                         if state.switchPaused {

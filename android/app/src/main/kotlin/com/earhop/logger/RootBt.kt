@@ -9,7 +9,7 @@ import android.os.Looper
 /**
  * Runs as root outside the app (started through `su` with app_process), where the hidden Bluetooth
  * connect and disconnect calls are not blocked by the privileged permission check.
- * Usage: RootBt <connect|disconnect> <AA:BB:CC:DD:EE:FF>. Prints one line starting with EARHOP_ROOT.
+ * Usage: RootBt <connect|disconnect|activeNone|activeSet> <AA:BB:CC:DD:EE:FF>. Prints one line starting with EARHOP_ROOT.
  */
 object RootBt {
     @JvmStatic
@@ -33,9 +33,11 @@ object RootBt {
             adapter.getProfileProxy(ctx, object : BluetoothProfile.ServiceListener {
                 override fun onServiceConnected(profile: Int, proxy: BluetoothProfile) {
                     try {
-                        val m = proxy.javaClass.getMethod(action, BluetoothDevice::class.java)
+                        // activeNone / activeSet: move media to the speaker or back to these earbuds (speaker fallback).
+                        val method = if (action.startsWith("active")) "setActiveDevice" else action
+                        val m = proxy.javaClass.getMethod(method, BluetoothDevice::class.java)
                         m.isAccessible = true
-                        println("EARHOP_ROOT ok $action=${m.invoke(proxy, dev)}")
+                        println("EARHOP_ROOT ok $action=${m.invoke(proxy, if (action == "activeNone") null else dev)}")
                     } catch (e: Throwable) {
                         println("EARHOP_ROOT fail ${e.javaClass.simpleName}: ${e.cause?.message ?: e.message}")
                     }

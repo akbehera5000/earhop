@@ -135,24 +135,29 @@ class MainActivity : Activity() {
     private lateinit var keepBox: LinearLayout
     private var keepSig = "init"
     private lateinit var selfTestText: TextView
+    private lateinit var techText: TextView
+    private lateinit var timelineBox: LinearLayout
+    /** Whether the "Set up from a computer" part of the helper setup is open. */
+    private var macHelpOpen = false
     private var appAccessShown = false
     private lateinit var crashCard: LinearLayout
     private val quickTiles = ArrayList<() -> Unit>()
     // dashboard
-    private lateinit var heroIcon: ImageView
+    private lateinit var hero: LinearLayout
+    private var heroHue: Glass.Hue? = null
+    private lateinit var heroBuds: BudsView
+    private lateinit var heroUnit: TextView
     private lateinit var heroWhere: TextView
     private lateinit var heroState: TextView
     private lateinit var stageBox: LinearLayout
+    private lateinit var stageBar: DotBar
     private lateinit var stageText: TextView
-    private val stageBars = ArrayList<View>()
     private lateinit var heroNote: TextView
     private lateinit var chipEar: TextView
     private lateinit var chipBattery: TextView
     private lateinit var chipCase: TextView
     private lateinit var chipLink: TextView
     private lateinit var safeBtn: Button
-    private lateinit var diagText: TextView
-    private lateinit var diagToggle: TextView
     private lateinit var crashText: TextView
 
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
@@ -180,9 +185,7 @@ class MainActivity : Activity() {
         frame.addView(scroll)
         for ((name, _) in tabs) {
             val p = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; visibility = View.GONE }
-            if (name != "Home") p.addView(text(name, 34f, textC, true).apply {
-                typeface = Typeface.create("sans-serif", Typeface.BOLD); letterSpacing = -0.01f; setPadding(dp(4), dp(8), 0, dp(16))
-            })
+            p.addView(pageHead(name))
             pages[name] = p
             content.addView(p, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         }
@@ -231,26 +234,80 @@ class MainActivity : Activity() {
         override fun setVisibility(v: Int) { super.setVisibility(v); (parent as? View)?.visibility = v }
     }
 
+    private val medium get() = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+
     /**
-     * A grouped glass section on the current page: a small title above a rounded glass card, and an optional footer note
-     * below it. Returns the card. Its first child is an invisible anchor, so code that keeps "child 0" while rebuilding
-     * a card keeps working.
+     * A card on the current page: a graphite panel with its title inside at the top and an optional footer note at the
+     * bottom. Returns the card's body. The body's first child is an invisible anchor, so code that keeps "child 0" while
+     * rebuilding a card keeps working.
      */
     private fun card(title: String?, footer: String? = null): LinearLayout {
-        val section = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        if (title != null) section.addView(text(title.uppercase(), 12.5f, subC, true).apply {
-            letterSpacing = 0.06f; setPadding(dp(16), dp(4), dp(16), dp(8))
-        })
-        val c = SectionBody(this).apply {
+        val section = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            background = g.surface(22)
-            setPadding(dp(16), dp(14), dp(16), dp(14))
+            background = g.surface(28)
+            setPadding(dp(18), dp(16), dp(18), dp(16))
         }
+        if (title != null) section.addView(text(title, 15.5f, textC).apply { typeface = medium; setPadding(0, 0, 0, dp(10)) })
+        val c = SectionBody(this).apply { orientation = LinearLayout.VERTICAL }
         c.addView(View(this).apply { visibility = View.GONE })
         section.addView(c, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-        if (footer != null) section.addView(text(footer, 12.5f, subC).apply { setPadding(dp(16), dp(7), dp(16), 0) })
-        root.addView(section, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(22) })
+        if (footer != null) section.addView(text(footer, 12.5f, subC).apply { setPadding(0, dp(12), 0, 0) })
+        root.addView(section, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(14) })
         return c
+    }
+
+    /** A card whose body opens and closes with a tap on its title row, closed at first. Returns the body. */
+    private fun expander(title: String, footer: String? = null): LinearLayout {
+        val c = card(null, footer)
+        val head = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        head.addView(text(title, 15.5f, textC).apply { typeface = medium }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        val arrow = text("+", 20f, subC)
+        head.addView(arrow)
+        c.addView(head)
+        val body = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; visibility = View.GONE; setPadding(0, dp(10), 0, 0) }
+        c.addView(body)
+        head.setOnClickListener {
+            tap(it)
+            val open = body.visibility != View.VISIBLE
+            body.visibility = if (open) View.VISIBLE else View.GONE
+            arrow.text = if (open) "−" else "+"
+            if (open) refresh()
+        }
+        head.contentDescription = "$title, tap to open"
+        return body
+    }
+
+    /** A page's title row: the name centred between two round buttons. Home also gets the running state below it. */
+    private fun pageHead(name: String): LinearLayout {
+        val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(0, dp(6), 0, dp(20)) }
+        val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        fun circle(icon: Int, desc: String, act: () -> Unit) = ImageView(this).apply {
+            setImageResource(icon); setColorFilter(textC); background = g.circle()
+            setPadding(dp(13), dp(13), dp(13), dp(13)); contentDescription = desc
+            setOnClickListener { tap(this); act() }
+        }
+        fun size() = LinearLayout.LayoutParams(dp(48), dp(48))
+        if (name == "Home") row.addView(circle(R.drawable.ic_tile_clip, "Share clipboard") { startActivity(Intent(this, ClipActivity::class.java)) }, size())
+        else row.addView(circle(R.drawable.ic_back, "Back to Home") { showPage("Home") }, size())
+        row.addView(text(if (name == "Home") "EarHop" else name, 26f, textC).apply {
+            gravity = Gravity.CENTER; typeface = medium; letterSpacing = -0.01f; maxLines = 1
+        }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        if (name == "Home") row.addView(circle(R.drawable.ic_menu, "Settings") { showPage("Settings") }, size())
+        else row.addView(View(this), size())
+        col.addView(row)
+        if (name == "Home") {
+            statusChip = text("Stopped", 12.5f, textC).apply {
+                typeface = medium
+                setPadding(dp(14), dp(6), dp(14), dp(6))
+                // EarHop should keep running: the chip starts it, but stopping is only in Settings, About.
+                setOnClickListener { tap(this); if (EhState.running) showPage("Settings") else toggle() }
+                contentDescription = "EarHop service"
+            }
+            col.addView(statusChip, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                gravity = Gravity.CENTER_HORIZONTAL; topMargin = dp(10)
+            })
+        }
+        return col
     }
 
     // ---------- pages and tab bar ----------
@@ -358,8 +415,8 @@ class MainActivity : Activity() {
         pages.forEach { (n, p) -> p.visibility = if (n == target) View.VISIBLE else View.GONE }
         navItems.forEach { (n, v) ->
             val on = n == target
-            v.first.setColorFilter(if (on) accent else subC)
-            v.second.setTextColor(if (on) accent else subC)
+            v.first.setColorFilter(if (on) textC else subC)
+            v.second.setTextColor(if (on) textC else subC)
             v.second.typeface = Typeface.create("sans-serif-medium", if (on) Typeface.BOLD else Typeface.NORMAL)
         }
         moveIndicator(true)
@@ -387,9 +444,10 @@ class MainActivity : Activity() {
         row.addView(texts, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { rightMargin = dp(12) })
         val sw = android.widget.Switch(this).apply {
             isChecked = get()
-            val states = arrayOf(intArrayOf(android.R.attr.state_checked), intArrayOf())
-            thumbTintList = android.content.res.ColorStateList(states, intArrayOf(Color.WHITE, Color.WHITE))
-            trackTintList = android.content.res.ColorStateList(states, intArrayOf(green, if (night) 0x70FFFFFF else 0x40000000))
+            // Neutral switch; the state shows on the track's outline (green on, red-grey off).
+            thumbDrawable = g.switchThumb(); trackDrawable = g.switchTrack()
+            thumbTintList = null; trackTintList = null
+            showText = false
             contentDescription = title
             setOnClickListener { tap(this); set(isChecked) }
         }
@@ -468,13 +526,13 @@ class MainActivity : Activity() {
         val bar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             background = g.track()
-            setPadding(dp(3), dp(3), dp(3), dp(3))
+            setPadding(dp(4), dp(4), dp(4), dp(4))
         }
         options.forEach { (value, label) ->
             text(label, 14f, textC).apply {
                 gravity = Gravity.CENTER
                 maxLines = 1
-                setPadding(dp(4), dp(8), dp(4), dp(8))
+                setPadding(dp(4), dp(9), dp(4), dp(9))
                 setOnClickListener { if (value != get()) { tap(this); set(value) }; paintSeg(bar, options, get()) }
                 contentDescription = label
             }.also { bar.addView(it, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)) }
@@ -490,7 +548,7 @@ class MainActivity : Activity() {
             val cell = bar.getChildAt(i) as? TextView ?: continue
             val on = options[i].first == value
             cell.background = if (on) g.selected() else null
-            cell.setTextColor(if (on) textC else subC)
+            cell.setTextColor(if (on) g.onPrimary else subC)
             cell.typeface = Typeface.create("sans-serif-medium", if (on) Typeface.BOLD else Typeface.NORMAL)
             cell.contentDescription = options[i].second + if (on) ", selected" else ""
         }
@@ -500,12 +558,12 @@ class MainActivity : Activity() {
         text = label
         isAllCaps = false
         textSize = 15.5f
-        setTextColor(if (filled) Color.WHITE else accent)
+        setTextColor(if (filled) g.onPrimary else textC)
         background = if (filled) g.filled() else g.tinted()
         typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
         stateListAnimator = null
-        minHeight = dp(46); minimumHeight = dp(46)
-        setPadding(dp(16), dp(9), dp(16), dp(9))
+        minHeight = dp(48); minimumHeight = dp(48)
+        setPadding(dp(18), dp(10), dp(18), dp(10))
         setOnClickListener { tap(this, true); onClick() }
     }
 
@@ -565,28 +623,15 @@ class MainActivity : Activity() {
 
     private fun buildHome() {
         root = pages.getValue("Home")
-        val head = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(dp(4), dp(8), 0, 0) }
-        val titles = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        titles.addView(text("EarHop", 34f, textC, true).apply { typeface = Typeface.create("sans-serif", Typeface.BOLD); letterSpacing = -0.01f })
-        titles.addView(text("Your ${Earbuds.short(this)} follow you between devices", 14f, subC))
-        head.addView(titles, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        statusChip = text("Stopped", 13f, Color.WHITE, true).apply {
-            setPadding(dp(14), dp(7), dp(14), dp(7))
-            // EarHop should keep running: the chip starts it, but stopping is only in Settings, About.
-            setOnClickListener { tap(this); if (EhState.running) showPage("Settings") else toggle() }
-            contentDescription = "EarHop service"
-        }
-        head.addView(statusChip)
-        root.addView(head, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(20) })
 
         onboardCard = card("Set up EarHop")
         onboardCard.visibility = View.GONE
 
-        // crash from the previous run, if any
-        crashCard = card("The app closed unexpectedly last time")
-        crashText = text("", 11f, subC).apply { typeface = Typeface.MONOSPACE }
+        // crash from the previous run, if any; the report itself is only copied, never shown
+        crashCard = card("EarHop closed unexpectedly last time")
+        crashText = text("A short report was saved on this device. Copy it to report the problem.", 13f, subC)
         crashCard.addView(crashText)
-        buttons(crashCard, button("Copy", false) { copy("EarHop crash", prefs.getString("last_crash", "") ?: "") },
+        buttons(crashCard, button("Copy report", false) { copy("EarHop crash", prefs.getString("last_crash", "") ?: "") },
             button("Dismiss", false) { prefs.edit().remove("last_crash").apply(); crashCard.visibility = View.GONE })
         crashCard.visibility = View.GONE
 
@@ -604,35 +649,39 @@ class MainActivity : Activity() {
         buildDashboard()
 
         val actions = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        takeBtn = button("Take ${Earbuds.short(this)}", true) { quick(true) }.apply { minHeight = dp(54); textSize = 17f }
-        releaseBtn = button("Release", false) { quick(false) }.apply { minHeight = dp(54); textSize = 17f }
+        takeBtn = button("Take ${Earbuds.short(this)}", true) { quick(true) }.apply { minHeight = dp(56); textSize = 16.5f }
+        releaseBtn = button("Release", false) { quick(false) }.apply { minHeight = dp(56); textSize = 16.5f }
         actions.addView(takeBtn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.4f).apply { rightMargin = dp(10) })
         actions.addView(releaseBtn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        root.addView(actions, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(16) })
+        root.addView(actions, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(14) })
 
-        // Large toggles: switching, clipboard, and noise control while Galaxy Buds are connected here. Long press pauses.
-        val tiles = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        quickTile(tiles, R.drawable.ic_tile_auto, "Switching", "autoPausedUntil", { prefs.getBoolean("auto", true) }) {
+        // Large toggles in a grid: switching and clipboard, and noise control with Galaxy Buds. Long press pauses.
+        val row1 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        quickTile(row1, Glass.Hue.INDIGO, "Switching", "autoPausedUntil", { prefs.getBoolean("auto", true) }) {
             prefs.edit().putBoolean("auto", !prefs.getBoolean("auto", true)).apply()
             try { Tiles.refreshAll(applicationContext) } catch (e: Exception) { }
         }
-        quickTile(tiles, R.drawable.ic_tile_clip, "Clipboard", "clipPausedUntil", { prefs.getBoolean("clipSync", true) }) {
+        quickTile(row1, Glass.Hue.EMBER, "Clipboard", "clipPausedUntil", { prefs.getBoolean("clipSync", true) }) {
             setClipSync(!prefs.getBoolean("clipSync", true))
         }
-        quickTile(tiles, R.drawable.ic_tile_noise, "Noise", null, {
-            val n = EhState.budsClient?.takeIf { it.connected }?.snapshot()?.noise
-            n != null && n != "off"
-        }, state = {
-            when (EhState.budsClient?.takeIf { it.connected }?.snapshot()?.noise) {
-                null -> if (Earbuds.isBuds(this)) "Buds not here" else "Galaxy Buds only"
-                "anc" -> "Cancelling"; "ambient" -> "Ambient"; else -> "Off"
+        root.addView(row1, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(14) })
+        if (Earbuds.isBuds(this)) {
+            val row2 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+            quickTile(row2, Glass.Hue.VIOLET, "Noise control", null, {
+                val n = EhState.budsClient?.takeIf { it.connected }?.snapshot()?.noise
+                n != null && n != "off"
+            }, state = {
+                when (EhState.budsClient?.takeIf { it.connected }?.snapshot()?.noise) {
+                    null -> "Buds not on this device"
+                    "anc" -> "Noise cancelling"; "ambient" -> "Ambient sound"; else -> "Off"
+                }
+            }) {
+                val c = EhState.budsClient?.takeIf { it.connected }
+                if (c == null) Toast.makeText(this, "Noise control works while the Galaxy Buds are connected to this device", Toast.LENGTH_SHORT).show()
+                else c.setNoise(when (c.snapshot().noise) { "off" -> "anc"; "anc" -> "ambient"; else -> "off" })
             }
-        }) {
-            val c = EhState.budsClient?.takeIf { it.connected }
-            if (c == null) Toast.makeText(this, "Noise control works while the Galaxy Buds are connected to this device", Toast.LENGTH_SHORT).show()
-            else c.setNoise(when (c.snapshot().noise) { "off" -> "anc"; "anc" -> "ambient"; else -> "off" })
+            root.addView(row2, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(14) })
         }
-        root.addView(tiles, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(22) })
 
         val strip = card("Your devices")
         stripBox = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
@@ -642,30 +691,38 @@ class MainActivity : Activity() {
         homeClipText = text("", 14f, textC)
         homeClip.addView(homeClipText)
         buttons(homeClip, button("Share clipboard", true) { startActivity(Intent(this, ClipActivity::class.java)) },
-            button("Clipboard settings", false) { showPage("Clipboard") }, top = 12)
+            button("Settings", false) { showPage("Clipboard") }, top = 14)
 
         val histCard = card("Recent switches")
         historyBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         histCard.addView(historyBox)
     }
 
-    /** One large Home toggle. Tap switches it; long press pauses it ([pauseKey]) for a while. */
-    private fun quickTile(parent: LinearLayout, icon: Int, label: String, pauseKey: String?, isOn: () -> Boolean,
+    /**
+     * One large Home toggle. Tap switches it; long press pauses it ([pauseKey]) for a while. When on it glows in [hue]
+     * with a green outline; when off it is graphite with a red-grey outline.
+     */
+    private fun quickTile(parent: LinearLayout, hue: Glass.Hue, label: String, pauseKey: String?, isOn: () -> Boolean,
                           state: (() -> String)? = null, act: () -> Unit) {
         val t = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(14), dp(14), dp(12), dp(14))
-            minimumHeight = dp(108)
+            setPadding(dp(18), dp(16), dp(16), dp(14))
+            minimumHeight = dp(132)
         }
-        val img = ImageView(this).apply { setImageResource(icon); setPadding(dp(7), dp(7), dp(7), dp(7)) }
-        t.addView(img, LinearLayout.LayoutParams(dp(36), dp(36)))
-        val name = text(label, 15f, textC, true).apply { setPadding(0, dp(10), 0, 0); maxLines = 1 }
-        t.addView(name)
-        val st = text("", 12.5f, subC).apply { maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END }
+        val top = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        val name = text(label, 15.5f, textC).apply { typeface = medium; maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END }
+        top.addView(name, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        val knob = View(this).apply { importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO }
+        top.addView(knob, LinearLayout.LayoutParams(dp(40), dp(24)))
+        t.addView(top)
+        t.addView(View(this), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+        val st = text("", 13f, subC).apply { maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END; setPadding(0, dp(18), 0, 0) }
         t.addView(st)
+        val bar = DotBar(this, textC, sepC)
+        t.addView(bar, lp(8))
         t.setOnClickListener { tap(it, true); act(); refresh() }
         if (pauseKey != null) t.setOnLongClickListener { tap(it, true); pauseDialog("Pause ${label.lowercase()}", pauseKey); true }
-        parent.addView(t, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { if (parent.childCount > 0) leftMargin = dp(10) })
+        parent.addView(t, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f).apply { if (parent.childCount > 0) leftMargin = dp(14) })
         var sig = ""
         quickTiles += {
             val on = isOn()
@@ -676,12 +733,13 @@ class MainActivity : Activity() {
             if (now != sig) {
                 sig = now
                 val lit = on && !paused
-                t.background = if (lit) g.surface(22, tint = Glass.alpha(accent, if (night) 0xCC else 0xE6)) else g.surface(22)
-                img.background = round(if (lit) 0x33FFFFFF else Glass.alpha(accent, 0x24), 18)
-                img.setColorFilter(if (lit) Color.WHITE else accent)
+                t.background = if (lit) g.aurora(28, hue, flip = hue == Glass.Hue.EMBER, outline = g.on) else g.outlined(28, g.off)
+                knob.background = g.knob(lit, lit)
                 name.setTextColor(if (lit) Color.WHITE else textC)
                 st.text = s
                 st.setTextColor(if (lit) 0xD9FFFFFF.toInt() else if (paused) orange else subC)
+                bar.setColors(if (lit) Color.WHITE else textC, if (lit) 0x40FFFFFF else sepC)
+                bar.fraction = if (lit) 1f else 0f
                 t.contentDescription = "$label: $s${if (pauseKey != null) ". Long press to pause." else ""}"
             }
         }
@@ -714,9 +772,12 @@ class MainActivity : Activity() {
         divider(earCard)
         switchRow(earCard, "Pause when one earbud is out", "Otherwise only when both are out. Putting it back resumes.",
             { prefs.getBoolean("pauseOnOne", true) }) { prefs.edit().putBoolean("pauseOnOne", it).apply() }
+        switchRow(earCard, "Use the speaker when earbuds are out", "Audio you start with the earbuds out of your ears plays on this device's speaker, and moves back to the earbuds when you put one in. Keeps the earbuds connected while they are out.",
+            { prefs.getBoolean("speakerFallback", true) }) { prefs.edit().putBoolean("speakerFallback", it).apply() }
         gentleRow = switchRow(earCard, "Gentle scanning while playing", "Less crackle on some phones, slower ear detection",
             { prefs.getBoolean("gentle", false) }) { prefs.edit().putBoolean("gentle", it).apply() }
         earCard.addView(button("Test pause now", false) { sendAction(EarService.ACTION_TEST_PAUSE) }, lp(10))
+        earCard.addView(button("Test speaker (5 seconds)", false) { sendAction(EarService.ACTION_TEST_SPEAKER) }, lp(8))
 
         val names = card("Advanced: earbud names", "EarHop finds each pair by a part of its Bluetooth name. Changes apply within a few seconds.")
         podsField = field(names, "AirPods name contains", prefs.getString("filter", "AirPods") ?: "AirPods")
@@ -865,44 +926,44 @@ class MainActivity : Activity() {
         segmented(look, listOf("system" to "Automatic", "light" to "Light", "dark" to "Dark"), { prefs.getString("theme", "system") ?: "system" }) { v ->
             if (v != prefs.getString("theme", "system")) { prefs.edit().putString("theme", v).apply(); recreate() }
         }
-        look.addView(text("Accent colour", 13f, subC).apply { setPadding(dp(2), dp(14), 0, dp(6)) })
-        val sw = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-        accents.forEach { (name, col) ->
-            val chosen = (prefs.getString("accent", "Auto") ?: "Auto") == name
-            val v = View(this).apply {
-                background = (if (name == "Auto") GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT, intArrayOf(airpodsAccent, budsAccent))
-                    else GradientDrawable()).apply { shape = GradientDrawable.OVAL; if (name != "Auto") setColor(col); if (chosen) setStroke(dp(3), textC) }
-                contentDescription = (if (name == "Auto") "Accent follows the earbuds" else "$name accent") + if (chosen) ", selected" else ""
-                setOnClickListener { tap(this); prefs.edit().putString("accent", name).apply(); recreate() }
-            }
-            sw.addView(v, LinearLayout.LayoutParams(dp(34), dp(34)).apply { rightMargin = dp(12) })
-        }
-        look.addView(sw, lp(4))
         divider(look)
         switchRow(look, "Haptic feedback", "A light tap when you press buttons and switches", { prefs.getBoolean("haptics", true) }) {
             prefs.edit().putBoolean("haptics", it).apply()
         }
 
+        val backup = card("Backup", "The file holds your pairing secret. Keep it private, and delete it once you have restored it.")
+        backup.addView(text("Save this device's EarHop settings to a file, or restore them after reinstalling or on a new device.", 13f, subC))
+        buttons(backup, button("Export", false) { exportSettings() }, button("Import", false) { importSettings() }, top = 12)
+
         val about = card("About")
         val version = try { packageManager.getPackageInfo(packageName, 0).versionName } catch (e: Exception) { "?" }
-        about.addView(text("EarHop $version", 16f, textC, true))
-        about.addView(text("Android ${Build.VERSION.RELEASE}, device name ${prefs.getString("name", "?")}", 13f, subC).apply { setPadding(0, dp(2), 0, 0) })
-        selfTestText = text("", 13f, subC).apply { setPadding(0, dp(8), 0, 0); visibility = View.GONE }
-        about.addView(selfTestText)
-        buttons(about, button("Run self test", false) { runSelfTest() }, button("Copy diagnostics", false) { copy("EarHop diagnostics", diagnostics()) })
+        about.addView(text("EarHop $version", 17f, textC).apply { typeface = medium })
+        about.addView(text("${pretty(prefs.getString("name", "phone") ?: "phone")}, Android ${Build.VERSION.RELEASE}", 13f, subC).apply { setPadding(0, dp(2), 0, 0) })
         about.addView(button("Stop EarHop", false) { if (EhState.running) toggle() }.also { b ->
             syncs += { b.text = if (EhState.running) "Stop EarHop" else "EarHop is stopped"; b.isEnabled = EhState.running; b.alpha = if (EhState.running) 1f else 0.5f }
-        }, lp(8))
-        about.addView(text("Stopping lasts until you open EarHop again.", 12.5f, subC).apply { setPadding(dp(2), dp(6), 0, 0) })
+        }, lp(14))
+        about.addView(text("Stopping lasts until you open EarHop again.", 12.5f, subC).apply { setPadding(dp(2), dp(8), 0, 0) })
+
+        // For bug reports: what the service sees, the protocol self test and a summary to copy.
+        val adv = expander("Advanced")
+        techText = text("", 12f, subC).apply { typeface = Typeface.MONOSPACE; setTextIsSelectable(true) }
+        adv.addView(techText)
+        selfTestText = text("", 13f, subC).apply { setPadding(0, dp(10), 0, 0); visibility = View.GONE }
+        adv.addView(selfTestText)
+        buttons(adv, button("Run self test", false) { runSelfTest() }, button("Copy diagnostics", false) { copy("EarHop diagnostics", diagnostics()) }, top = 12)
     }
 
     private fun buildActivityPage() {
         root = pages.getValue("Activity")
-        val dec = card("Recent decisions")
-        handoffView = text("", 12f, subC).apply { typeface = Typeface.MONOSPACE }
-        dec.addView(handoffView)
+        val tl = card("Timeline")
+        timelineBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        tl.addView(timelineBox)
 
-        val log = card("Log")
+        // The raw log stays available for bug reports, closed by default.
+        val log = expander("Technical log", "Never contains clipboard contents or your pairing secret.")
+        log.addView(text("Recent decisions", 13f, subC).apply { setPadding(0, 0, 0, dp(4)) })
+        handoffView = text("", 12f, subC).apply { typeface = Typeface.MONOSPACE; setPadding(0, 0, 0, dp(12)) }
+        log.addView(handoffView)
         segmented(log, listOf("all" to "All", "switch" to "Switching", "clip" to "Clipboard", "problems" to "Problems"),
             { prefs.getString("logFilter", "all") ?: "all" }) { v -> prefs.edit().putString("logFilter", v).apply(); refresh() }
         logView = text("", 11f, subC).apply { typeface = Typeface.MONOSPACE; setPadding(0, dp(8), 0, 0); setTextIsSelectable(true) }
@@ -915,67 +976,67 @@ class MainActivity : Activity() {
 
     // ---------- dashboard ----------
 
-    private fun chip(): TextView = text("", 13f, textC, true).apply {
-        background = round(chipC, 16)
+    private fun chip(): TextView = text("", 13f, Color.WHITE).apply {
+        typeface = medium
+        background = round(0x24FFFFFF, 16)
         setPadding(dp(12), dp(6), dp(12), dp(6))
     }
 
+    /**
+     * The main card: the earbuds, a big dot-matrix battery level, where they are and what they do. It glows magenta while
+     * the earbuds are here, indigo while they are elsewhere, violet while switching.
+     */
     private fun buildDashboard() {
-        val c = card(null)
-        c.background = g.surface(28, strong = true)
-        c.setPadding(dp(20), dp(20), dp(20), dp(16))
+        val c = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            setPadding(dp(22), dp(20), dp(22), dp(22))
+            minimumHeight = dp(330)
+            clipToOutline = true
+        }
+        hero = c
+        root.addView(c, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(14) })
+
         val top = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-        heroIcon = ImageView(this).apply {
-            setImageResource(R.drawable.ic_stat_earhop)
-            setPadding(dp(16), dp(16), dp(16), dp(16))
-            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
-        }
-        top.addView(heroIcon, LinearLayout.LayoutParams(dp(72), dp(72)).apply { rightMargin = dp(16) })
-        val words = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        words.addView(text(if (Earbuds.isBuds(this)) "Galaxy Buds2 Pro" else "AirPods Pro 2", 17f, textC, true))
-        heroWhere = text("", 14f, subC)
-        words.addView(heroWhere)
-        heroState = text("", 30f, accent, true).apply { typeface = Typeface.create("sans-serif-medium", Typeface.BOLD) }
-        words.addView(heroState)
-        top.addView(words, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        c.addView(top)
+        top.addView(text(if (Earbuds.isBuds(this)) "Galaxy Buds2 Pro" else "AirPods Pro 2", 16f, Color.WHITE).apply { typeface = medium },
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        top.addView(ImageView(this).apply {
+            setImageResource(R.drawable.ic_info); setColorFilter(0xCCFFFFFF.toInt())
+            background = round(0x24FFFFFF, 18); setPadding(dp(8), dp(8), dp(8), dp(8))
+            contentDescription = "Earbud details"
+            setOnClickListener { tap(this); showPage("Buds") }
+        }, LinearLayout.LayoutParams(dp(36), dp(36)))
+        c.addView(top, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
 
-        stageBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(0, dp(14), 0, 0); visibility = View.GONE }
-        val bars = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        repeat(4) { i ->
-            val v = View(this)
-            stageBars += v
-            bars.addView(v, LinearLayout.LayoutParams(0, dp(5), 1f).apply { if (i < 3) rightMargin = dp(5) })
-        }
-        stageBox.addView(bars)
-        stageText = text("", 13f, subC).apply { setPadding(0, dp(6), 0, 0) }
-        stageBox.addView(stageText)
-        c.addView(stageBox)
+        heroBuds = BudsView(this, resources.displayMetrics.density)
+        c.addView(heroBuds, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(6) })
+        heroUnit = text("", 14f, 0xCCFFFFFF.toInt()).apply { gravity = Gravity.CENTER; setPadding(0, dp(6), 0, 0) }
+        c.addView(heroUnit)
 
-        heroNote = text("", 13f, subC).apply { setPadding(0, dp(12), 0, 0); visibility = View.GONE }
+        heroState = text("", 13.5f, Color.WHITE).apply { typeface = medium; setPadding(dp(16), dp(7), dp(16), dp(7)) }
+        c.addView(heroState, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(22) })
+        heroWhere = text("", 14f, 0xCCFFFFFF.toInt()).apply { gravity = Gravity.CENTER; setPadding(0, dp(10), 0, 0) }
+        c.addView(heroWhere)
+
+        stageBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(0, dp(16), 0, 0); visibility = View.GONE }
+        stageBar = DotBar(this, Color.WHITE, 0x40FFFFFF)
+        stageBox.addView(stageBar, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        stageText = text("", 13f, 0xCCFFFFFF.toInt()).apply { gravity = Gravity.CENTER; setPadding(0, dp(6), 0, 0) }
+        stageBox.addView(stageText, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        c.addView(stageBox, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+
+        heroNote = text("", 13f, 0xE6FFFFFF.toInt()).apply { gravity = Gravity.CENTER; setPadding(0, dp(12), 0, 0); visibility = View.GONE }
         c.addView(heroNote)
 
-        val chips = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(0, dp(14), 0, 0) }
+        val chips = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER; setPadding(0, dp(18), 0, 0) }
         chipEar = chip(); chipBattery = chip(); chipCase = chip(); chipLink = chip()
-        for (ch in listOf(chipEar, chipBattery, chipCase, chipLink)) chips.addView(ch, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { rightMargin = dp(6) })
+        for (ch in listOf(chipEar, chipBattery, chipCase)) chips.addView(ch, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { leftMargin = dp(3); rightMargin = dp(3) })
         c.addView(android.widget.HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false; addView(chips) })
 
         safeBtn = button("Resume automatic switching", true) {
             EhState.controller?.clearSafeMode(); refresh()
-        }.apply { visibility = View.GONE }
-        c.addView(safeBtn, lp(12))
-
-        diagToggle = text("Diagnostics  ▸", 13f, subC, true).apply {
-            setPadding(0, dp(14), 0, 0)
-            setOnClickListener {
-                val open = diagText.visibility != View.VISIBLE
-                diagText.visibility = if (open) View.VISIBLE else View.GONE
-                this.text = if (open) "Diagnostics  ▾" else "Diagnostics  ▸"
-            }
-        }
-        c.addView(diagToggle)
-        diagText = text("", 12f, subC).apply { typeface = Typeface.MONOSPACE; visibility = View.GONE; setPadding(0, dp(6), 0, 0) }
-        c.addView(diagText)
+        }.apply { visibility = View.GONE; setTextColor(Color.BLACK); background = g.filled(color = Color.WHITE) }
+        c.addView(safeBtn, lp(14))
     }
 
     private fun pretty(n: String) = when (n) { "mac" -> "Mac"; "phone" -> "Phone"; "tab" -> "Tablet"; else -> n.replaceFirstChar { it.uppercase() } }
@@ -986,27 +1047,60 @@ class MainActivity : Activity() {
         val stage = EhState.stage
         val phase = EhState.phase
         val switching = run && (stage != null || phase == HandoffPhase.CLAIM_PENDING || phase == HandoffPhase.RELEASE_PENDING)
-        heroIcon.background = if (EhState.owner) g.filled(36) else round(chipC, 36)
-        heroIcon.setColorFilter(if (EhState.owner) Color.WHITE else subC)
+        val hue = when { switching -> Glass.Hue.VIOLET; run && EhState.owner -> Glass.Hue.MAGENTA; else -> Glass.Hue.INDIGO }
+        if (hue != heroHue) { heroHue = hue; hero.background = g.hero(36, hue) }
+        heroWhere.visibility = if (run) View.VISIBLE else View.GONE
         heroWhere.text = when {
-            !run -> "EarHop is stopped"
+            !run -> ""
             EhState.owner -> "Connected to this ${pretty(prefs.getString("name", "phone") ?: "phone").lowercase()}"
             holder != null -> "Connected to ${pretty(holder)}"
-            else -> "Not connected"
+            else -> "Not connected to any of your devices"
         }
         val word = when {
             !run -> "Stopped"
             switching -> "Switching"
-            EhState.safeMode -> "Safe mode"
-            EhState.call -> "Call"
+            EhState.safeMode -> "Switching paused"
+            EhState.call -> "On a call"
             EhState.owner && EhState.playing -> "Playing"
             EhState.owner && phase == HandoffPhase.OWNER_PAUSED_BY_EAR_REMOVAL -> "Paused"
             EhState.owner -> "Ready"
-            EhState.playing -> "Playing here"
+            EhState.playing -> "Playing on speaker"
             else -> if (holder == null) "Idle" else "Ready"
         }
         heroState.text = word
-        heroState.setTextColor(if (EhState.safeMode) orange else if (EhState.owner || switching) accent else textC)
+        // The outline says whether the earbuds are here: green yes, red-grey no.
+        heroState.background = g.statePill(run && EhState.owner).also { (it as GradientDrawable).setColor(0x24FFFFFF) }
+
+        // The picture: both earbuds and the case with their batteries, and where each bud is. Galaxy Buds report every
+        // bud and the case over their channel; AirPods give the wear state and the two buds' levels.
+        val live = EhState.budsClient?.takeIf { it.connected }?.snapshot()
+        // Battery reports arrive only when a level changes, so a level stays good while the channel is open and for
+        // 10 minutes after (it used to vanish after a minute of no change).
+        val fresh = live != null || (EhState.batAt != 0L && now - EhState.batAt < 600_000)
+        val ear = EhState.ear
+        fun place(p: String?, side: Int): String = when {
+            !run -> "unknown"
+            p != null && p != "unknown" -> if (p == "disconnected") "unknown" else p
+            !EhState.owner -> "unknown"
+            ear == "both" -> "wearing"
+            ear == "one" -> if (side == 0) "wearing" else "idle"
+            ear == "none" -> "idle"
+            else -> "unknown"
+        }
+        heroBuds.model = BudsView.Model(
+            left = BudsView.Bud(if (fresh) EhState.batA else -1, place(live?.placeL?.takeIf { run && EhState.owner }, 0), live?.chargeL == true),
+            right = BudsView.Bud(if (fresh) EhState.batB else -1, place(live?.placeR?.takeIf { run && EhState.owner }, 1), live?.chargeR == true),
+            case = if (fresh) EhState.batCase else -1, caseCharging = live?.chargeCase == true,
+            playing = EhState.playing, here = run && EhState.owner, stem = !Earbuds.isBuds(this),
+        )
+        heroUnit.text = when {
+            !run -> "Start EarHop to follow your earbuds"
+            EhState.owner && !fresh && Earbuds.isBuds(this) -> "Reading the Buds\u2026 (${EhState.buds})"
+            EhState.owner && EhState.onSpeaker -> "Out of your ears \u00B7 playing on the speaker"
+            EhState.owner -> when (ear) { "both" -> "Both in your ears"; "one" -> "One in your ear"; "none" -> "Out of your ears"; else -> "" }
+            else -> ""
+        }
+        heroUnit.visibility = if (heroUnit.text.isEmpty()) View.GONE else View.VISIBLE
 
         stageBox.visibility = if (switching) View.VISIBLE else View.GONE
         if (switching) {
@@ -1017,7 +1111,7 @@ class MainActivity : Activity() {
                 s.startsWith("Waiting") || s.startsWith("Releasing") -> 1
                 else -> 0
             }
-            stageBars.forEachIndexed { i, v -> v.background = round(if (i <= cur) accent else chipC, 3) }
+            stageBar.fraction = (cur + 1) / 4f
             stageText.text = stage ?: phase.label
         }
 
@@ -1027,38 +1121,31 @@ class MainActivity : Activity() {
         heroNote.visibility = View.VISIBLE
         when {
             !run -> heroNote.visibility = View.GONE
-            failure != null && !switching -> { heroNote.text = "Last switch failed: $failure."; heroNote.setTextColor(orange) }
-            hold != null && !EhState.owner && !switching -> { heroNote.text = "Not switching: $hold."; heroNote.setTextColor(subC) }
+            failure != null && !switching -> heroNote.text = "Last switch failed: $failure."
+            hold != null && !EhState.owner && !switching -> heroNote.text = "Not switching: $hold."
             else -> heroNote.visibility = View.GONE
         }
         safeBtn.visibility = if (run && EhState.safeMode) View.VISIBLE else View.GONE
 
-        val ear = EhState.ear
-        chipEar.text = when (ear) { "both" -> "Both in ears"; "one" -> "One in ear"; "none" -> "Out of ears"; else -> "Ears unknown" }
-        chipEar.setTextColor(if (ear == "none") orange else textC)
-        val fresh = now - EhState.batAt < 60000
-        val low = minOf(EhState.batA.takeIf { it >= 0 } ?: 100, EhState.batB.takeIf { it >= 0 } ?: 100) <= 20
-        chipBattery.visibility = if (fresh && (EhState.batA >= 0 || EhState.batB >= 0)) View.VISIBLE else View.GONE
-        chipBattery.text = "L ${if (EhState.batA >= 0) "${EhState.batA}%" else "-"}  R ${if (EhState.batB >= 0) "${EhState.batB}%" else "-"}"
-        chipBattery.setTextColor(if (low) red else textC)
-        chipCase.visibility = if (fresh && EhState.batCase >= 0) View.VISIBLE else View.GONE
-        chipCase.text = "Case ${EhState.batCase}%"
-        chipLink.visibility = if (run) View.VISIBLE else View.GONE
-        chipLink.text = EhState.transport
-        chipLink.setTextColor(if (EhState.transport.contains("nobody")) orange else textC)
+        // Wear state and batteries are in the picture now, so the chips stay hidden.
+        for (ch in listOf(chipEar, chipBattery, chipCase)) ch.visibility = View.GONE
 
+        takeBtn.isEnabled = !EhState.owner && !switching
+        takeBtn.alpha = if (takeBtn.isEnabled) 1f else 0.45f
+        takeBtn.text = if (EhState.owner) "Connected here" else "Take ${Earbuds.short(this)}"
+        releaseBtn.isEnabled = EhState.owner && !switching
+        releaseBtn.alpha = if (releaseBtn.isEnabled) 1f else 0.45f
+    }
+
+    /** What the service sees right now, for the Advanced card and bug reports. */
+    private fun technical(): String {
         val r = EhState.earReading
-        diagText.text = "state   ${phase.label}\n" +
+        return "state   ${EhState.phase.label}\n" +
             "ears    ${r.ear} via ${r.source} (${r.confidence} confidence)\n" +
             "audio   ${if (EhState.playing) "playing" else "idle"}${if (EhState.call) ", call" else ""}\n" +
             "link    ${EhState.transport}\n" +
-            (if (Earbuds.isBuds(this)) "buds    ${EhState.buds}\n" else "beacon  ${EhState.beaconInfo.ifEmpty { "none yet" }}\n") +
+            (if (Earbuds.isBuds(this)) "buds    ${EhState.buds}\n" else "beacon  ${EhState.beaconInfo.ifEmpty { "none yet" }}\nscan    ${EhState.scanMode}, direct ${EhState.aacp}\n") +
             "auto    ${if (prefs.getBoolean("auto", true)) "on" else "off"}"
-        takeBtn.isEnabled = !EhState.owner && !switching
-        takeBtn.alpha = if (takeBtn.isEnabled) 1f else 0.5f
-        takeBtn.text = if (EhState.owner) "Connected here" else "Take ${Earbuds.short(this)}"
-        releaseBtn.isEnabled = EhState.owner && !switching
-        releaseBtn.alpha = if (releaseBtn.isEnabled) 1f else 0.5f
     }
 
     // ---------- Home: needs attention, devices ----------
@@ -1119,14 +1206,14 @@ class MainActivity : Activity() {
         if (name == self) return when {
             !run -> "Stopped" to subC
             EhState.owner -> "Has earbuds" to green
-            EhState.playing -> "Playing" to accent
-            else -> "This device" to accent
+            EhState.playing -> "Playing" to green
+            else -> "This device" to subC
         }
         val p = EhState.peers[name]?.takeIf { now - it.seenAt < 15000 } ?: return "Not seen" to subC
         return when {
             p.call -> "On a call" to orange
             p.owner -> "Has earbuds" to green
-            p.playing -> "Playing" to accent
+            p.playing -> "Playing" to green
             else -> "Online" to green
         }
     }
@@ -1176,7 +1263,7 @@ class MainActivity : Activity() {
             if (idx > 0) divider(peersBox)
             val r = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(0, dp(2), 0, dp(2)) }
             r.addView(text(pretty(name), 16f, textC, true))
-            r.addView(status(state.replaceFirstChar { it.uppercase() }, if (owner) green else accent, 13f).apply { setPadding(0, dp(3), 0, 0) })
+            r.addView(status(state.replaceFirstChar { it.uppercase() }, green, 13f).apply { setPadding(0, dp(3), 0, 0) })
             peersBox.addView(r)
         }
     }
@@ -1209,17 +1296,16 @@ class MainActivity : Activity() {
         for ((name, v, where) in listOf(Triple("Left", l, wl), Triple("Right", r, wr), Triple("Case", cs, wc))) {
             val t = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER
-                background = round(chipC, 16); setPadding(dp(6), dp(12), dp(6), dp(10))
+                background = round(chipC, 22); setPadding(dp(10), dp(16), dp(10), dp(12))
                 contentDescription = "$name ${if (v >= 0) "$v percent" else "unknown"} $where"
             }
-            t.addView(text(if (v >= 0) "$v%" else "-", 24f, if (v in 0..20) red else textC, true).apply { gravity = Gravity.CENTER })
-            // A small level bar under the number.
-            val track = FrameLayout(this).apply { background = round(sepC, 3) }
-            if (v > 0) track.addView(View(this).apply { background = round(if (v <= 20) red else green, 3) },
-                FrameLayout.LayoutParams(dp((56 * v / 100).coerceAtLeast(4)), dp(5)))
-            t.addView(track, LinearLayout.LayoutParams(dp(56), dp(5)).apply { topMargin = dp(6); bottomMargin = dp(6) })
+            t.addView(DotText(this, dp(26), if (v in 0..20) red else textC).apply { text = if (v >= 0) "$v%" else "-" },
+                LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+            // The level as a dotted bar under the number.
+            t.addView(DotBar(this, if (v in 0..20) red else textC, sepC).apply { fraction = if (v > 0) v / 100f else 0f },
+                LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(10); bottomMargin = dp(6) })
             t.addView(text(if (where.isEmpty()) name else "$name · $where", 12f, subC).apply { gravity = Gravity.CENTER })
-            row.addView(t, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { if (name != "Left") leftMargin = dp(8) })
+            row.addView(t, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { if (name != "Left") leftMargin = dp(10) })
         }
         batteryBox.addView(row)
         if (sn == null && ago >= 1) batteryBox.addView(text("Updated $ago min ago", 12f, subC).apply { setPadding(dp(2), dp(8), 0, 0) })
@@ -1334,7 +1420,7 @@ class MainActivity : Activity() {
         fun note(s: String) { clipSetup.addView(text(s, 12.5f, subC).apply { setPadding(dp(16), dp(2), 0, 0) }) }
         fun step(done: Boolean, title: String, body: String, action: String?, act: (() -> Unit)?) {
             val r = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(0, dp(12), 0, 0) }
-            r.addView(text("${if (done) "✓" else "○"}  $title", 15f, if (done) green else textC, true))
+            r.addView(text("${if (done) "✓" else "○"}  $title", 15f, if (done) subC else textC).apply { typeface = medium })
             if (!done && body.isNotEmpty()) r.addView(text(body, 12.5f, subC).apply { setPadding(dp(22), dp(2), 0, 0) })
             if (!done && action != null && act != null) r.addView(button(action, true) { act() }, lp(8))
             clipSetup.addView(r)
@@ -1398,10 +1484,16 @@ class MainActivity : Activity() {
                 if (installed) step(false, "Keep Shizuku running", "No battery limits and auto-start for Shizuku too.", null, null)
                 if (installed) buttons(clipSetup, button("Shizuku battery", false) { askBattery(HelperStarter.SHIZUKU_PACKAGE) },
                     button("Shizuku auto-start", false) { openAutostart(HelperStarter.SHIZUKU_PACKAGE) }, top = 8)
-                clipSetup.addView(text("Or from the Mac", 15f, textC, true).apply { setPadding(0, dp(16), 0, dp(4)) })
-                clipSetup.addView(text("With this phone connected over USB debugging, run tools/phone_clip.sh, or this command:", 12.5f, subC).apply { setPadding(0, 0, 0, dp(6)) })
-                clipSetup.addView(codeBox(helperCommand()))
-                clipSetup.addView(button("Copy the command", false) { copy("EarHop command", helperCommand()) }, lp(8))
+                // The computer route is for people who use adb; closed unless opened.
+                clipSetup.addView(text("Set up from a computer  ${if (macHelpOpen) "−" else "+"}", 15f, textC).apply {
+                    typeface = medium; setPadding(0, dp(18), 0, dp(4))
+                    setOnClickListener { tap(this); macHelpOpen = !macHelpOpen; clipSetupSig = ""; refresh() }
+                })
+                if (macHelpOpen) {
+                    clipSetup.addView(text("With this phone connected over USB debugging, run tools/phone_clip.sh, or this command:", 12.5f, subC).apply { setPadding(0, 0, 0, dp(6)) })
+                    clipSetup.addView(codeBox(helperCommand()))
+                    clipSetup.addView(button("Copy the command", false) { copy("EarHop command", helperCommand()) }, lp(8))
+                }
             }
         }
     }
@@ -1418,7 +1510,7 @@ class MainActivity : Activity() {
         list.forEach { r ->
             divider(recentBox)
             val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-            val badge = text(if (r.sent) "↑" else "↓", 15f, if (r.sent) accent else green, true).apply {
+            val badge = text(if (r.sent) "↑" else "↓", 15f, textC, true).apply {
                 gravity = Gravity.CENTER; background = round(chipC, 14)
             }
             row.addView(badge, LinearLayout.LayoutParams(dp(28), dp(28)).apply { rightMargin = dp(12) })
@@ -1509,7 +1601,7 @@ class MainActivity : Activity() {
         onboardSig = sig
         while (onboardCard.childCount > 1) onboardCard.removeViewAt(1)
         fun step(n: Int, done: Boolean, title: String, body: String, action: String?, act: (() -> Unit)?) {
-            onboardCard.addView(text("${if (done) "✓" else "$n."}  $title", 16f, if (done) green else textC, true).apply { setPadding(0, dp(8), 0, 0) })
+            onboardCard.addView(text("${if (done) "✓" else "$n."}  $title", 16f, if (done) subC else textC).apply { typeface = medium; setPadding(0, dp(8), 0, 0) })
             onboardCard.addView(text(body, 13f, subC))
             if (!done && action != null && act != null) onboardCard.addView(button(action, true) { act() }, lp(6))
         }
@@ -1629,21 +1721,28 @@ class MainActivity : Activity() {
         val sig = list.joinToString("|") { "${it.at}${it.kind}" }
         if (sig == historySig) return
         historySig = sig
-        historyBox.removeAllViews()
-        if (list.isEmpty()) { historyBox.addView(status("Nothing yet. Switches appear here with the reason.", subC, 13f)); return }
-        val f = java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault())
-        list.take(5).forEachIndexed { i, it ->
-            if (i > 0) divider(historyBox)
-            val r = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-            val words = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-            words.addView(text(if (it.kind == "claim") "Took the ${Earbuds.short(this)}" else "Released", 15f, textC))
-            words.addView(text(it.reason, 12f, subC))
-            r.addView(words, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-            r.addView(text(f.format(java.util.Date(it.at)), 13f, subC))
-            historyBox.addView(r)
+        for (box in listOf(historyBox, timelineBox)) {
+            box.removeAllViews()
+            if (list.isEmpty()) { box.addView(status("Nothing yet. Switches appear here with the reason.", subC, 13f)); continue }
+            val f = java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault())
+            // Home shows the last five with Undo; the Activity timeline shows all of them.
+            val shown = if (box === historyBox) list.take(5) else list
+            shown.forEachIndexed { i, it ->
+                if (i > 0) divider(box)
+                val r = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+                r.addView(View(this).apply { background = g.dot(if (it.kind == "claim") g.on else g.off) }, LinearLayout.LayoutParams(dp(10), dp(10)).apply { rightMargin = dp(12) })
+                val words = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+                words.addView(text(if (it.kind == "claim") "Took the ${Earbuds.short(this)}" else "Released", 15f, textC))
+                words.addView(text(it.reason, 12f, subC))
+                r.addView(words, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+                r.addView(text(f.format(java.util.Date(it.at)), 13f, subC))
+                box.addView(r)
+            }
+            if (box === historyBox) {
+                val last = list.first()
+                box.addView(button(if (last.kind == "claim") "Undo: release the earbuds" else "Undo: take the earbuds back", false) { quick(last.kind != "claim") }, lp(12))
+            }
         }
-        val last = list.first()
-        historyBox.addView(button(if (last.kind == "claim") "Undo: release the earbuds" else "Undo: take the earbuds back", false) { quick(last.kind != "claim") }, lp(12))
     }
 
     // ---------- Settings: keep running, about ----------
@@ -1701,6 +1800,87 @@ class MainActivity : Activity() {
         }
     }
 
+    // ---------- backup ----------
+
+    private val reqExport = 41
+    private val reqImport = 42
+    /** Not carried over: per-install grants (root managers ask again) and screen state. */
+    private val skipKeys = setOf("last_crash", "asked", "page", "rootGranted")
+
+    private fun exportSettings() {
+        val i = Intent(Intent.ACTION_CREATE_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("application/json")
+            .putExtra(Intent.EXTRA_TITLE, "earhop-${prefs.getString("name", "device")}-settings.json")
+        try { startActivityForResult(i, reqExport) } catch (e: Exception) { Toast.makeText(this, "No file picker on this device", Toast.LENGTH_SHORT).show() }
+    }
+
+    private fun importSettings() {
+        val i = Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("*/*")
+        try { startActivityForResult(i, reqImport) } catch (e: Exception) { Toast.makeText(this, "No file picker on this device", Toast.LENGTH_SHORT).show() }
+    }
+
+    /** The settings as JSON, each value with its type so it restores exactly. */
+    private fun settingsJson(): String {
+        val all = org.json.JSONObject()
+        for ((k, v) in prefs.all) {
+            if (k in skipKeys || v == null) continue
+            val e = org.json.JSONObject()
+            when (v) {
+                is String -> e.put("t", "s").put("v", v)
+                is Boolean -> e.put("t", "b").put("v", v)
+                is Int -> e.put("t", "i").put("v", v)
+                is Long -> e.put("t", "l").put("v", v)
+                is Float -> e.put("t", "f").put("v", v.toDouble())
+                is Set<*> -> e.put("t", "set").put("v", org.json.JSONArray(v.map { it.toString() }))
+                else -> continue
+            }
+            all.put(k, e)
+        }
+        return org.json.JSONObject().put("earhopSettings", 1).put("prefs", all).toString(2)
+    }
+
+    /** Writes the values of a settings file over the current ones. Returns how many were restored. */
+    private fun applySettings(json: String): Int {
+        val file = org.json.JSONObject(json)
+        if (file.optInt("earhopSettings") != 1) throw IllegalArgumentException("this is not an EarHop settings file")
+        val all = file.getJSONObject("prefs")
+        val ed = prefs.edit()
+        var n = 0
+        for (k in all.keys()) {
+            if (k in skipKeys) continue
+            val e = all.getJSONObject(k)
+            when (e.getString("t")) {
+                "s" -> ed.putString(k, e.getString("v"))
+                "b" -> ed.putBoolean(k, e.getBoolean("v"))
+                "i" -> ed.putInt(k, e.getInt("v"))
+                "l" -> ed.putLong(k, e.getLong("v"))
+                "f" -> ed.putFloat(k, e.getDouble("v").toFloat())
+                "set" -> { val a = e.getJSONArray("v"); ed.putStringSet(k, (0 until a.length()).map { a.getString(it) }.toSet()) }
+                else -> continue
+            }
+            n++
+        }
+        ed.commit()
+        return n
+    }
+
+    private fun backupResult(requestCode: Int, uri: Uri) {
+        try {
+            if (requestCode == reqExport) {
+                contentResolver.openOutputStream(uri, "wt")!!.use { it.write(settingsJson().toByteArray()) }
+                Toast.makeText(this, "Settings saved. The file holds your pairing secret, keep it private.", Toast.LENGTH_LONG).show()
+                return
+            }
+            val n = applySettings(contentResolver.openInputStream(uri)!!.use { it.readBytes().toString(Charsets.UTF_8) })
+            EhLog.w("settings: restored $n values from a backup file")
+            Toast.makeText(this, "Settings restored", Toast.LENGTH_SHORT).show()
+            // Restart with the restored name and secret; onResume starts EarHop again when it is ready.
+            if (EhState.running) stopService(Intent(this, EarService::class.java))
+            handler.postDelayed({ recreate() }, 800)
+        } catch (e: Exception) {
+            Toast.makeText(this, "Could not ${if (requestCode == reqExport) "save" else "restore"} the settings: ${e.message}", Toast.LENGTH_LONG).show()
+        }
+    }
+
     // ---------- pairing ----------
 
     private fun scanQr() {
@@ -1717,7 +1897,12 @@ class MainActivity : Activity() {
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        val r = com.google.zxing.integration.android.IntentIntegrator.parseActivityResult(requestCode, resultCode, data)
+        if (requestCode == reqExport || requestCode == reqImport) {
+            val uri = data?.data
+            if (resultCode == RESULT_OK && uri != null) backupResult(requestCode, uri)
+            return
+        }
+        val r =com.google.zxing.integration.android.IntentIntegrator.parseActivityResult(requestCode, resultCode, data)
         if (r == null) { super.onActivityResult(requestCode, resultCode, data); return }
         if (r.contents == null) return
         if (!handleScan(r.contents)) Toast.makeText(this, "That is not an EarHop pairing code", Toast.LENGTH_LONG).show()
@@ -1796,7 +1981,7 @@ class MainActivity : Activity() {
             t.addView(text(c.label, 16f, textC))
             if (c.detail.isNotEmpty() && !c.ok) t.addView(text(c.detail, 12f, subC))
             r.addView(t, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-            if (c.ok) r.addView(text("✓", 20f, green, true))
+            if (c.ok) r.addView(View(this).apply { background = g.dot(g.on); contentDescription = "Allowed" }, LinearLayout.LayoutParams(dp(14), dp(14)))
             else r.addView(button("Allow", true) { c.fix() }.apply { setPadding(dp(14), dp(4), dp(14), dp(4)); minHeight = dp(38); minimumHeight = dp(38) })
             permsBox.addView(r)
         }
@@ -1885,8 +2070,13 @@ class MainActivity : Activity() {
     private fun sendAction(a: String) {
         if (!EhState.running) { Toast.makeText(this, "Start EarHop first", Toast.LENGTH_SHORT).show(); return }
         val take = a == EarService.ACTION_TAKE
-        val test = a == EarService.ACTION_TEST_PAUSE
-        Toast.makeText(this, if (test) "Pausing playback..." else if (take) "Taking the ${Earbuds.short(this)}..." else "Releasing the ${Earbuds.short(this)}...", Toast.LENGTH_SHORT).show()
+        val test = a == EarService.ACTION_TEST_PAUSE || a == EarService.ACTION_TEST_SPEAKER
+        Toast.makeText(this, when {
+            a == EarService.ACTION_TEST_SPEAKER -> "Speaker for 5 seconds..."
+            test -> "Pausing playback..."
+            take -> "Taking the ${Earbuds.short(this)}..."
+            else -> "Releasing the ${Earbuds.short(this)}..."
+        }, Toast.LENGTH_SHORT).show()
         if (!test) EhLog.w("handoff: manual ${if (take) "take" else "release"} requested")
         try { startService(Intent(this, EarService::class.java).setAction(a)) } catch (e: Exception) { EhLog.w("action failed ${e.message}") }
     }
@@ -1935,7 +2125,7 @@ class MainActivity : Activity() {
     override fun onResume() {
         super.onResume()
         val crash = prefs.getString("last_crash", null)
-        if (crash != null) { crashText.text = crash.take(900); crashCard.visibility = View.VISIBLE }
+        if (crash != null) crashCard.visibility = View.VISIBLE
         // Android 13 and later only ask for log access while EarHop is on screen, so restart an unconfirmed log watch now.
         if (EhState.running && ClipSync.rootWatching && ClipSync.watchMode == "log access" && ClipSync.logOk != true) {
             ClipSync.restartLogWatch(applicationContext)
@@ -1986,7 +2176,8 @@ class MainActivity : Activity() {
     private fun refresh() {
         val run = EhState.running
         statusChip.text = if (run) "Running" else "Stopped"
-        statusChip.background = g.pill(if (run) green else 0xFF8E8E93.toInt())
+        statusChip.background = g.statePill(run)
+        if (techText.isShown) techText.text = technical()
         startBtn.text = if (run) "Save" else "Start"
 
         refreshHistory()
@@ -2009,15 +2200,19 @@ class MainActivity : Activity() {
         val age = if (EhState.beaconAt == 0L) -1L else (System.currentTimeMillis() - EhState.beaconAt) / 1000
         val buds = Earbuds.isBuds(this)
         gentleRow.visibility = if (buds) View.GONE else View.VISIBLE
+        // Plain words here; the raw readings are in Settings, Advanced.
+        val earWords = when (EhState.earReading.ear) {
+            "both" -> "Both earbuds are in your ears."; "one" -> "One earbud is in your ear."
+            "none" -> "The earbuds are out of your ears."; else -> "In-ear status is not known yet."
+        }
         earInfo.text = when {
             !run -> "Start EarHop to detect your earbuds."
-            buds -> "Galaxy Buds report in-ear status over their status channel, only while they are connected to this device. " +
-                "Channel: ${EhState.buds}. Reading: ${EhState.earReading.ear} (${EhState.earReading.source}, ${EhState.earReading.confidence} confidence)." +
-                if (EhState.buds.startsWith("refused")) "\nIf it keeps refusing, close Galaxy Wearable; switching still works without it." else ""
-            age < 0 && EhState.appleSeen == 0 -> "No Apple Bluetooth signal seen yet (scan: ${EhState.scanMode.ifEmpty { "starting" }}). Check Location permission, Location switched on, and that the AirPods are close."
-            age < 0 -> "Apple devices seen (${EhState.appleSeen}), but no AirPods beacon from your model yet. Put the earbuds in your ears and keep them close."
-            else -> "Last beacon ${age}s ago: ${EhState.beaconInfo}\nScan: ${EhState.scanMode}  ·  Direct channel: ${EhState.aacp}" +
-                if (EhState.aacp == "not supported") "\nOn this phone the AirPods report one bud instantly but the other bud only after several seconds. Both buds out is always detected at once." else ""
+            buds -> "$earWords Galaxy Buds report this while they are connected to this device." +
+                if (EhState.buds.startsWith("refused")) "\nIf it stays unknown, close Galaxy Wearable; switching still works without it." else ""
+            age < 0 && EhState.appleSeen == 0 -> "Looking for your AirPods. Keep them close, and check that Location is allowed and switched on."
+            age < 0 -> "Apple devices are nearby, but not your AirPods yet. Put the earbuds in your ears and keep them close."
+            else -> "$earWords Updated ${age}s ago." +
+                if (EhState.aacp == "not supported") "\nOn this phone the second earbud is reported a few seconds late. Both out is always detected at once." else ""
         }
         rootCard?.let {
             val granted = prefs.getBoolean("rootGranted", false)

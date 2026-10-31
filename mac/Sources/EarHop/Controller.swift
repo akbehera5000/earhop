@@ -62,7 +62,9 @@ final class Controller {
         s.cooldown = c.cooldownSeconds
         s.minPlay = max(c.debounceSeconds, c.minPlaySeconds)
         s.quiet = c.quietSeconds
-        s.releaseAfterOut = c.releaseAfterOutSeconds
+        // With speaker fallback the earbuds stay connected while they are out, so putting them back in is noticed and
+        // the sound can move back to them; otherwise this Mac lets go of them after releaseAfterOutSeconds out.
+        s.releaseAfterOut = c.speakerFallback ? 1e9 : c.releaseAfterOutSeconds
         s.resumeWithin = c.resumeWithinSeconds
         s.pauseWhenOneOut = c.pauseWhenOneOut
         s.safeModeAfter = c.safeModeAfterFailures

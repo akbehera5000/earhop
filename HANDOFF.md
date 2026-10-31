@@ -195,6 +195,20 @@ Mac with Buds: if the channel is not open, ear is assumed `both`. The channel cl
     recent clips (memory only), QR pairing in the app (ZXing Android Embedded, Apache-2.0), self test, Copy diagnostics,
     log filters and Share log. Earbud names apply live (`EarService.detectEarbuds`). Checked on the phone with
     screenshots of every page in dark and light mode; the tablet, QR scanning and real copy detection are untested.
+35. (2026-10-31) Android 1.2.0, new look and production build. Design from a reference picture the owner chose: dot
+    grid page (`Glass.page`, one repeated bitmap tile), glowing colour cards (`Glass.aurora`, `Glass.hero` with dotted
+    orbits), dot-matrix digits and dotted bars (`DotViews.kt`: `DotText`, `DotBar`). Owner rule (global CLAUDE.md, added
+    2026-10-30): state colours (green on, red-grey off) only on outlines, decorative colours only in backgrounds, so
+    switches, tiles and status rings show state by their outline and text is never coloured for decoration. Cards now
+    hold their title inside (`card()`), `expander()` makes a closed card. Debug output moved to Settings, Advanced and
+    Activity, Technical log. New Backup card (Export, Import through the system file picker; `skipKeys` leaves out
+    `rootGranted`, crash text and screen state). Release build: R8 with `-keep class com.earhop.logger.**` because
+    `app_process` starts `RootBt` and `ClipHelper` by name and several classes use reflection; signing from
+    `~/.earhop/android-signing.properties` (key `~/.earhop/earhop-release.jks`, never in the repository; back both up,
+    losing them means every device must uninstall again). The release key differs from the debug key, so the first
+    install needs an uninstall, which erases the settings: export first. Checked on the emulator (every page, dark and
+    light, release APK, no crash); not yet on the phone or tablet, and the dot-matrix battery has not been seen with
+    real earbuds.
 
 ## 8. What is built (feature list)
 
