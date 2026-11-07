@@ -113,6 +113,8 @@ class MainActivity : Activity() {
     private lateinit var clipSetup: LinearLayout
     private var clipSetupSig = "init"
     private lateinit var recentBox: LinearLayout
+    private lateinit var sleepBtn: Button
+    private lateinit var recentSearch: EditText
     private lateinit var statusBox: LinearLayout
     private lateinit var diagText: TextView
     private var statusSig = ""
@@ -695,6 +697,11 @@ class MainActivity : Activity() {
         actions.addView(releaseBtn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         root.addView(actions, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(14) })
 
+        // Sleep timer: pause and let go of the earbuds after a while.
+        sleepBtn = button("Sleep timer", false) { sleepDialog() }.apply { minHeight = dp(48) }
+        root.addView(sleepBtn, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(14) })
+        syncs += { sleepBtn.text = if (EhState.sleepUntil > System.currentTimeMillis()) "Sleep timer: until ${shortTime(EhState.sleepUntil)}" else "Sleep timer" }
+
         // Large toggles in a grid: switching and clipboard, and noise control with Galaxy Buds. Long press pauses.
         val row1 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         quickTile(row1, Glass.Hue.INDIGO, "Switching", "autoPausedUntil", { prefs.getBoolean("auto", true) }) {
@@ -803,6 +810,10 @@ class MainActivity : Activity() {
         batteryBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         bat.addView(batteryBox)
 
+        val own = card("This device's Buds settings", "What you choose here (noise control, equalizer) is applied whenever the Buds connect to this device, so each device keeps its own.")
+        switchRow(own, "Use this device's own settings", null, { prefs.getBoolean("ownBudsSettings", true) }) { prefs.edit().putBoolean("ownBudsSettings", it).apply() }
+        own.visibility = if (Earbuds.isBuds(this)) View.VISIBLE else View.GONE
+
         budsCard = card("Galaxy Buds controls")
         budsCard.visibility = if (Earbuds.isBuds(this)) View.VISIBLE else View.GONE
 
@@ -865,10 +876,20 @@ class MainActivity : Activity() {
         clipSetup = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         auto.addView(clipSetup)
 
-        val recent = card("Recent clips", "Kept only in memory on this device, never saved or logged, and cleared when EarHop stops. Tap one to copy it again.")
+        val recent = card("Recent clips", "Kept only in memory on this device and cleared when EarHop stops; pinned clips are kept, encrypted with your shared secret. Never logged. Tap one to copy it again.")
         switchRow(recent, "Keep recent clips", null, { ClipSync.keepRecent(this) }) { on ->
             prefs.edit().putBoolean("clipHistory", on).apply(); if (!on) ClipSync.recent.clear(); recentSig = ""; refresh()
         }
+        recentSearch = EditText(this).apply {
+            hint = "Search clips"; setSingleLine(); textSize = 15f; setTextColor(textC); setHintTextColor(subC)
+            background = round(chipC, 14); setPadding(dp(14), dp(10), dp(14), dp(10))
+            addTextChangedListener(object : android.text.TextWatcher {
+                override fun afterTextChanged(e: android.text.Editable?) { recentSig = ""; refreshRecent() }
+                override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+                override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+            })
+        }
+        recent.addView(recentSearch, lp(8))
         recentBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         recent.addView(recentBox)
 
@@ -946,6 +967,16 @@ class MainActivity : Activity() {
             { prefs.getBoolean("auto", true) }) { prefs.edit().putBoolean("auto", it).apply(); try { Tiles.refreshAll(applicationContext) } catch (e: Exception) { } }
         divider(ho)
         pauseRow(ho, "autoPausedUntil")
+
+        val extras = card("Extras", "Follow my attention: when you unlocked this device in the last 30 s and audio starts here, the earbuds come here even if another device is still playing (Android tells apps about unlocking, not typing). Calls and meetings: a call, or an app in a call mode (Zoom, Meet, WhatsApp) for 2 s, takes the earbuds before music. These settings and the clipboard ones are shared: change them on one device and they change on all.")
+        switchRow(extras, "Follow my attention", "Audio on the device you just unlocked wins", { prefs.getBoolean("followAttention", false) }) { prefs.edit().putBoolean("followAttention", it).apply() }
+        divider(extras)
+        switchRow(extras, "Keep the same volume", "When the earbuds move here, use the volume the other device had", { prefs.getBoolean("volumeHandover", true) }) { prefs.edit().putBoolean("volumeHandover", it).apply() }
+        divider(extras)
+        switchRow(extras, "Low battery alerts", "At 20 % and 10 % for each bud and the case, on every device", { prefs.getBoolean("lowBatteryAlerts", true) }) { prefs.edit().putBoolean("lowBatteryAlerts", it).apply() }
+        divider(extras)
+        switchRow(extras, "Allow other apps to control EarHop", "Tasker and similar apps: broadcasts com.earhop.logger.action.TAKE, RELEASE, SEND_CLIPBOARD, SEND_TEXT (text), SLEEP (minutes), SLEEP_CANCEL",
+            { prefs.getBoolean("allowAutomation", false) }) { prefs.edit().putBoolean("allowAutomation", it).apply() }
 
         val rulesCard = card("Switching rules")
         rulesBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
@@ -1589,6 +1620,18 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun sleepDialog() {
+        if (!EhState.running) { Toast.makeText(this, "Start EarHop first", Toast.LENGTH_SHORT).show(); return }
+        val on = EhState.sleepUntil > System.currentTimeMillis()
+        val mins = listOf(15, 30, 45, 60, 90)
+        val items = (if (on) listOf("Cancel the sleep timer") else emptyList()) + mins.map { "In $it minutes" }
+        val d = AlertDialog.Builder(this).setTitle("Pause and release the earbuds")
+            .setItems(items.toTypedArray()) { _, i -> if (on && i == 0) Extras.setSleep(applicationContext, 0) else Extras.setSleep(applicationContext, mins[i - if (on) 1 else 0]); refresh() }
+            .setNegativeButton("Close", null).create()
+        blurBehind(d)
+        d.show()
+    }
+
     /** Copy diagnostics: asks every device, waits 15 s, writes one file and opens the share sheet. */
     private fun collectDiagnostics() {
         if (diagCollecting) return
@@ -1623,15 +1666,27 @@ class MainActivity : Activity() {
     }
 
     private fun refreshRecent() {
-        val list = ClipSync.recent.toList()
+        val q = recentSearch.text.toString().trim()
+        fun match(r: ClipSync.Recent) = q.isEmpty() || (r.text ?: "").contains(q, ignoreCase = true) || r.dev.contains(q, ignoreCase = true)
+        val pins = ClipSync.pinned.toList().filter(::match)
+        val list = ClipSync.recent.toList().filter(::match)
         val minute = System.currentTimeMillis() / 60000
-        val sig = "${ClipSync.keepRecent(this)}$minute" + list.joinToString { "${it.at}${it.receipt}" }
+        val sig = "${ClipSync.keepRecent(this)}$minute$q" + pins.joinToString { "${it.text}" } + list.joinToString { "${it.at}${it.receipt}${ClipSync.isPinned(it)}" }
         if (sig == recentSig) return
         recentSig = sig
         recentBox.removeAllViews()
+        if (pins.isNotEmpty()) {
+            recentBox.addView(text("Pinned", 13f, subC).apply { setPadding(0, dp(8), 0, dp(2)) })
+            pins.forEach { r -> recentRow(r) }
+        }
         if (!ClipSync.keepRecent(this)) return
-        if (list.isEmpty()) { recentBox.addView(status("Nothing yet.", subC, 13f).apply { setPadding(0, dp(8), 0, 0) }); return }
-        list.forEach { r ->
+        if (list.isEmpty()) { recentBox.addView(status(if (q.isEmpty()) "Nothing yet." else "No clip matches.", subC, 13f).apply { setPadding(0, dp(8), 0, 0) }); return }
+        if (pins.isNotEmpty()) recentBox.addView(text("Recent", 13f, subC).apply { setPadding(0, dp(12), 0, dp(2)) })
+        list.forEach { r -> recentRow(r) }
+        recentBox.addView(button("Clear", false) { ClipSync.recent.clear(); recentSig = ""; refresh() }, lp(12))
+    }
+
+    private fun recentRow(r: ClipSync.Recent) {
             divider(recentBox)
             val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
             val badge = text(if (r.sent) "↑" else "↓", 15f, textC, true).apply {
@@ -1641,6 +1696,8 @@ class MainActivity : Activity() {
             val words = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
             val preview = when {
                 r.kind == "image" -> "Image, ${r.size / 1024} KB"
+                r.kind == "file" -> "File: ${r.text ?: ""}"
+                r.kind == "link" -> "Link: ${r.text ?: ""}"
                 r.text == null -> "Long text, ${r.size / 1024} KB"
                 else -> r.text.replace(Regex("\\s+"), " ").trim().take(90)
             }
@@ -1650,13 +1707,19 @@ class MainActivity : Activity() {
             words.addView(text("${if (r.sent) "Sent" else "From ${pretty(r.dev)}"}, $whenS", 12f, subC))
             if (r.sent && r.receipt.isNotEmpty()) words.addView(text(r.receipt, 12f, subC))
             row.addView(words, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            if (r.text != null && r.kind != "image") {
+                val pin = text(if (ClipSync.isPinned(r)) "Unpin" else "Pin", 13f, textC).apply {
+                    setPadding(dp(10), dp(6), dp(10), dp(6)); background = round(chipC, 12)
+                    contentDescription = if (ClipSync.isPinned(r)) "Unpin, saved clips are kept after a restart" else "Pin: keep it after a restart"
+                    setOnClickListener { tap(it); ClipSync.togglePin(applicationContext, r); recentSig = ""; refreshRecent() }
+                }
+                row.addView(pin)
+            }
             if (r.text != null) row.setOnClickListener {
                 tap(it, true); ClipSync.copyBack(applicationContext, r.text)
                 Toast.makeText(this, "Copied", Toast.LENGTH_SHORT).show()
             }
             recentBox.addView(row)
-        }
-        recentBox.addView(button("Clear", false) { ClipSync.recent.clear(); recentSig = ""; refresh() }, lp(12))
     }
 
     // ---------- Galaxy Buds controls ----------

@@ -60,6 +60,13 @@ final class AppState: ObservableObject {
     /// Copy diagnostics: the file being collected, or the result to show.
     @Published var diagMessage = ""
     var onDiagnostics: (() -> Void)?
+    /// Pinned clips (saved encrypted, see PinStore) and the history search text.
+    @Published var clipPinned: [ClipRecent] = []
+    @Published var clipSearch = ""
+    var onPinsChanged: (() -> Void)?
+    /// Send files (to one device, or nil for all) and open a link on a device.
+    var onSendFiles: (([URL], String?) -> Void)?
+    var onSendLink: ((String, String) -> Void)?
     @Published var clipBlePeers = 0
     @Published var clipWifiPeers = 0
     var onClipRecopy: ((ClipRecent) -> Void)?
@@ -88,6 +95,9 @@ final class AppState: ObservableObject {
     }
 
     var onConfigChange: ((Config) -> Void)?
+    /// Sleep timer: when it pauses and releases (distant past when off). onSleep(minutes), 0 cancels.
+    @Published var sleepUntil = Date.distantPast
+    var onSleep: ((Int) -> Void)?
     var onTake: (() -> Void)?
     var onRelease: (() -> Void)?
     var onRestart: (() -> Void)?

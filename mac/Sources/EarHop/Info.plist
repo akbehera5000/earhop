@@ -10,6 +10,13 @@
     <string>EarHop reads the AirPods in-ear beacon to detect when they are worn.</string>
     <key>NSLocalNetworkUsageDescription</key>
     <string>EarHop shares playing and ear state with your other devices on this network.</string>
+    <key>CFBundleURLTypes</key>
+    <array><dict>
+        <key>CFBundleURLName</key><string>EarHop commands</string>
+        <key>CFBundleURLSchemes</key><array><string>earhop</string></array>
+    </dict></array>
+    <key>NSAppleScriptEnabled</key><true/>
+    <key>OSAScriptingDefinition</key><string>EarHop.sdef</string>
     <key>NSBonjourServices</key>
     <array><string>_earhop._udp</string></array>
 </dict>

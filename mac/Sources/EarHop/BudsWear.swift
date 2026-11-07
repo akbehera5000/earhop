@@ -247,8 +247,13 @@ final class BudsWear: NSObject, IOBluetoothRFCOMMChannelDelegate {
         var b = bytes
         return ch.writeSync(&b, length: UInt16(b.count)) == kIOReturnSuccess
     }
-    func setNoise(_ m: String) { send(BudsProtocol.noiseCommand(m)) }
-    func setEq(_ p: String) { send(BudsProtocol.eqCommand(p)) }
+    /// The user picked a noise mode or equalizer here: remembered as this device's own (kind "noise" or "eq").
+    var onUserChoice: ((String, String) -> Void)?
+    /// When the channel opens: this device's own noise mode and equalizer to apply, if any.
+    var ownSettings: () -> (noise: String?, eq: String?) = { (nil, nil) }
+
+    func setNoise(_ m: String) { if send(BudsProtocol.noiseCommand(m)) { onUserChoice?("noise", m) } }
+    func setEq(_ p: String) { if send(BudsProtocol.eqCommand(p)) { onUserChoice?("eq", p) } }
     func setSpatial(_ on: Bool) { send(BudsProtocol.spatialCommand(on)) }
     func setSeamless(_ on: Bool) { send(BudsProtocol.seamlessCommand(on)) }
     func setTouch(_ on: Bool) { send(BudsProtocol.touchCommand(on, state)) }
@@ -318,6 +323,13 @@ final class BudsWear: NSObject, IOBluetoothRFCOMMChannelDelegate {
             crc = BudsProtocol.CrcStats()
             status = "connected"
             Log.write("buds: wear channel open")
+            // Separate settings per device: this Mac's own noise control and equalizer, once the Buds answer.
+            let own = ownSettings()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                guard let self else { return }
+                if let n = own.noise { self.send(BudsProtocol.noiseCommand(n)); Log.write("buds: applied this Mac's noise control \(n)") }
+                if let e = own.eq { self.send(BudsProtocol.eqCommand(e)); Log.write("buds: applied this Mac's equalizer \(e)") }
+            }
         } else {
             channel = nil
             fail("open status \(error)")

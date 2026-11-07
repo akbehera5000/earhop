@@ -15,6 +15,7 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/EarHop"
 cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
+cp Resources/EarHop.sdef "$APP/Contents/Resources/EarHop.sdef"
 PL="$APP/Contents/Info.plist"
 cp Sources/EarHop/Info.plist "$PL"
 pb() { /usr/libexec/PlistBuddy -c "$1" "$PL" >/dev/null 2>&1 || /usr/libexec/PlistBuddy -c "$2" "$PL"; }

@@ -126,6 +126,8 @@ object EhState {
         while (history.size > 30) history.removeAt(history.size - 1)
     }
     val peers = java.util.concurrent.ConcurrentHashMap<String, PeerState>()
+    /** Sleep timer: when it pauses and releases (0 when off). */
+    @Volatile var sleepUntil = 0L
     /** When a device's copies were last refused for being far off its clock offset (for the status page). */
     val clockRefused = java.util.concurrent.ConcurrentHashMap<String, Long>()
 }

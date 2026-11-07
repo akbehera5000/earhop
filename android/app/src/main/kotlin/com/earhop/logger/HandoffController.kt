@@ -33,6 +33,7 @@ class HandoffController(
     private fun refreshSettings(fast: Boolean) {
         core.settings.priority = RuleStore.priority(ctx)
         core.settings.requireEar = prefs.getBoolean("requireEar", false)
+        core.settings.followAttention = prefs.getBoolean("followAttention", false)
         core.settings.pauseWhenOneOut = prefs.getBoolean("pauseOnOne", true)
         // With speaker fallback the earbuds stay connected while they are out, so putting them back in is noticed and
         // the sound can move back to them; otherwise this device lets go of them after 2 minutes out.
@@ -186,6 +187,8 @@ class HandoffController(
 
     /** Set by the service before each tick: speaker fallback has the sound on this device's speaker. */
     @Volatile var onSpeaker = false
+    /** Set by the service before each tick: the user unlocked this device in the last 30 s. */
+    @Volatile var attention = false
 
     fun tick(playing: Boolean, ear: EarReading, owner: Boolean, call: Boolean, peers: Collection<PeerState>, fast: Boolean = false) {
         val paused = System.currentTimeMillis() < prefs.getLong("autoPausedUntil", 0)
@@ -199,7 +202,7 @@ class HandoffController(
         if (wasOff) { wasOff = false; EhLog.w("handoff: automatic switching on") }
         refreshSettings(fast)
         val gate = if (!owner) RuleStore.gate(ctx) else null
-        val input = HandoffInput(System.currentTimeMillis(), playing, ear, owner, call, peers, gate, onSpeaker)
+        val input = HandoffInput(System.currentTimeMillis(), playing, ear, owner, call, peers, gate, onSpeaker, attention)
         val acts = synchronized(lock) { core.tick(input) }
         if (core.phase != lastPhase || acts.isNotEmpty()) {
             val names = acts.joinToString("; ") { it.toString() }

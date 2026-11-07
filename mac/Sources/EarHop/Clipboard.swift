@@ -22,6 +22,36 @@ enum PasswordLike {
     }
 }
 
+/// Pinned clips, the only ones saved: encrypted with the shared secret (a ClipCodec frame, kind "pins") in
+/// ~/.earhop/pins.bin. Text, links and file names only; unpinned history stays in memory.
+enum PinStore {
+    static var file: URL { Config.dir.appendingPathComponent("pins.bin") }
+
+    static func load(secret: String) -> [ClipRecent] {
+        guard let d = try? Data(contentsOf: file), let item = ClipCodec.decode(d, secret: secret),
+              let arr = try? JSONSerialization.jsonObject(with: item.data) as? [[String: Any]] else { return [] }
+        return arr.compactMap { o in
+            guard let text = o["text"] as? String, let kind = o["kind"] as? String else { return nil }
+            var r = ClipRecent(sent: o["sent"] as? Bool ?? false, dev: o["dev"] as? String ?? "", kind: kind, text: text)
+            r.date = Date(timeIntervalSince1970: o["at"] as? Double ?? 0)
+            r.pinned = true
+            return r
+        }
+    }
+
+    static func save(_ pins: [ClipRecent], secret: String) {
+        guard !Config.readOnly else { return }
+        let arr: [[String: Any]] = pins.compactMap { r in
+            r.text.map { ["text": $0, "kind": r.kind, "dev": r.dev, "sent": r.sent, "at": r.date.timeIntervalSince1970] }
+        }
+        guard let data = try? JSONSerialization.data(withJSONObject: arr),
+              let frame = ClipCodec.encode(ClipItem(id: "pins", dev: "", kind: "pins", mime: "application/json", ts: Proto.nowMs(), data: data), secret: secret)
+        else { return }
+        try? frame.write(to: file, options: .atomic)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+    }
+}
+
 /// One clip in the popover's recent list.
 struct ClipRecent: Identifiable {
     let id = UUID()
@@ -35,6 +65,7 @@ struct ClipRecent: Identifiable {
     var text: String?
     var image: Data?
     var date = Date()
+    var pinned = false
 }
 
 struct ClipItem {
@@ -212,6 +243,11 @@ final class ClipTcp {
         } catch { Log.write("clip: Wi-Fi listener not started: \(error)") }
     }
 
+    /// File streams: the secret, where to write an accepted file (nil refuses), and what to do when it is complete.
+    var secret = ""
+    var acceptFile: ((ClipItem) -> URL?)?
+    var onFile: ((ClipItem, URL?) -> Void)?
+
     /// Whether a connecting address belongs to one of the user's devices (learned from a signed status in the last 10
     /// minutes). Anything else on the network is closed at once, so it cannot tie the listener up with junk.
     var allowed: (String) -> Bool = { _ in true }
@@ -231,18 +267,24 @@ final class ClipTcp {
         }
         c.start(queue: queue)
         // The length must arrive within 10 s.
-        final class Flag { var got = false }
+        final class Flag { var got = false; var isFile = false }
         let headGot = Flag()
         queue.asyncAfter(deadline: .now() + 10) { if !headGot.got { c.cancel() } }
         c.receive(minimumIncompleteLength: 4, maximumLength: 4) { [weak self] head, _, _, _ in
             headGot.got = true
             guard let head, head.count == 4 else { c.cancel(); return }
+            // A file stream (FileTransfer.swift) instead of one clip frame.
+            if head == FileStream.magic, let self, let accept = self.acceptFile, let done = self.onFile {
+                headGot.isFile = true
+                self.serveFile(c, secret: self.secret, accept: accept, done: done)
+                return
+            }
             let b = [UInt8](head)
             let len = Int(b[0]) << 24 | Int(b[1]) << 16 | Int(b[2]) << 8 | Int(b[3])
             guard len > 0, len <= ClipTcp.maxFrame else { c.cancel(); return }
             self?.read(c, remaining: len, into: Data())
         }
-        queue.asyncAfter(deadline: .now() + 30) { c.cancel() }
+        queue.asyncAfter(deadline: .now() + 30) { if !headGot.isFile { c.cancel() } }
     }
 
     private func read(_ c: NWConnection, remaining: Int, into buf: Data) {
@@ -474,6 +516,8 @@ final class ClipSync {
     var blePeers: () -> [(dev: String, id: UUID)] = { [] }
     var onEvent: ((String) -> Void)?
     var onRecord: ((ClipRecent) -> Void)?
+    /// Other control messages (battery, notices, volume, settings): handled by the app.
+    var onControl: ((ClipItem) -> Void)?
     /// A delivery receipt changed for a sent clip: (clip id, words for the recent list).
     var onReceipt: ((String, String) -> Void)?
     /// Another device asked for diagnostics: return this Mac's part (status and the end of its log).
@@ -497,6 +541,9 @@ final class ClipSync {
     init(cfg: Config) { self.cfg = cfg }
 
     func start() {
+        tcp.secret = cfg.secret
+        tcp.acceptFile = { [weak self] item in self?.acceptFile(item) }
+        tcp.onFile = { [weak self] item, url in DispatchQueue.main.async { self?.fileDone(item, url) } }
         tcp.onFrame = { [weak self] f in self?.receive(f, via: "Wi-Fi") }
         ble.onFrame = { [weak self] f in self?.receive(f, via: "Bluetooth") }
         tcp.start()
@@ -555,12 +602,87 @@ final class ClipSync {
     }
 
     /// A control message (receipt or diagnostics) to one device, or to all when `to` is nil.
-    private func sendControl(kind: String, data: Data, to dev: String?) {
+    func sendControl(kind: String, data: Data, to dev: String?) {
         let id = (0 ..< 8).map { _ in String(format: "%02x", UInt8.random(in: 0 ... 255)) }.joined()
         let item = ClipItem(id: id, dev: cfg.deviceName, kind: kind, mime: "application/octet-stream", ts: Proto.nowMs(), data: data, to: dev ?? "")
         guard let frame = ClipCodec.encode(item, secret: cfg.secret) else { return }
         remember(id)
         deliver(frame, kind: kind, to: dev.map { [$0] })
+    }
+
+    // MARK: files and links
+
+    /// Sends files (any size, Wi-Fi only) to the given devices (nil: every device not excluded), one stream per device.
+    func sendFiles(_ urls: [URL], to only: Set<String>?) {
+        let skip = Set(cfg.clipExclude)
+        let byDev = Dictionary(grouping: wifiPeers(), by: \.dev)
+        let devs = byDev.keys.filter { d in d != cfg.deviceName && (only.map { set in set.contains(d) } ?? !skip.contains(d)) }
+        guard !devs.isEmpty else { onEvent?("Not sent: no device on Wi-Fi"); Log.write("file: not sent, no device on Wi-Fi"); return }
+        for url in urls {
+            let size = ((try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? NSNumber)?.int64Value ?? 0
+            let name = FileStream.safeName(url.lastPathComponent)
+            let id = (0 ..< 8).map { _ in String(format: "%02x", UInt8.random(in: 0 ... 255)) }.joined()
+            receipts.track(id, targets: Set(devs), now: Date())
+            onRecord?(ClipRecent(clipId: id, receipt: "Sending to " + devs.sorted().map(DeviceName.pretty).joined(separator: ", "), sent: true,
+                                 dev: devs.sorted().map(DeviceName.pretty).joined(separator: ", "), kind: "file", text: name))
+            for dev in devs {
+                guard let host = byDev[dev]?.first?.host else { continue }
+                let meta = (try? JSONSerialization.data(withJSONObject: ["name": name, "size": size])) ?? Data()
+                let item = ClipItem(id: id, dev: cfg.deviceName, kind: "file", mime: "application/octet-stream", ts: Proto.nowMs(), data: meta, to: dev)
+                guard let header = ClipCodec.encode(item, secret: cfg.secret) else { continue }
+                Log.write("file: sending \(name) (\(size / 1024) KB) to \(dev)")
+                tcp.sendFile(url, header: header, id: id, secret: cfg.secret, to: host) { ok in
+                    Log.write("file: \(name) to \(dev) \(ok ? "sent, waiting for the receipt" : "failed")")
+                }
+            }
+        }
+        onEvent?("Sending \(urls.count == 1 ? urls[0].lastPathComponent : "\(urls.count) files")")
+    }
+
+    /// Where an incoming file goes while it arrives (Downloads, hidden part file), or nil to refuse it.
+    private func acceptFile(_ item: ClipItem) -> URL? {
+        guard cfg.clipSync, cfg.clipReceive, !paused, item.dev != cfg.deviceName, item.to.isEmpty || item.to == cfg.deviceName,
+              ClockGuard.shared.fresh(dev: item.dev, senderMs: item.ts, nowMs: Proto.nowMs(), maxAgeMs: ClipCodec.maxAgeMs) else { return nil }
+        let dir = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first ?? Config.dir
+        return dir.appendingPathComponent(".earhop-\(item.id).part")
+    }
+
+    private func fileDone(_ item: ClipItem, _ part: URL?) {
+        let meta = (try? JSONSerialization.jsonObject(with: item.data) as? [String: Any]) ?? [:]
+        let name = FileStream.safeName(meta["name"] as? String ?? "file")
+        guard let part else { Log.write("file: \(name) from \(item.dev) broke off"); return }
+        let dest = FileStream.freePath(part.deletingLastPathComponent(), name)
+        do { try FileManager.default.moveItem(at: part, to: dest) } catch { Log.write("file: could not save \(name): \(error.localizedDescription)"); return }
+        Log.write("file: received \(dest.lastPathComponent) from \(item.dev)")
+        sendControl(kind: "ack", data: Data(item.id.utf8), to: item.dev)
+        onRecord?(ClipRecent(clipId: item.id, sent: false, dev: DeviceName.pretty(item.dev), kind: "file", text: dest.lastPathComponent))
+        onEvent?("Received \(dest.lastPathComponent)")
+        Notifier.post("\(dest.lastPathComponent) from \(DeviceName.pretty(item.dev))", "Saved in Downloads")
+    }
+
+    /// Opens a link on another device ("continue on"): http and https only.
+    func sendLink(_ url: String, to dev: String) {
+        guard let u = URL(string: url), ["http", "https"].contains(u.scheme?.lowercased() ?? "") else { onEvent?("Not a web link"); return }
+        let id = (0 ..< 8).map { _ in String(format: "%02x", UInt8.random(in: 0 ... 255)) }.joined()
+        let item = ClipItem(id: id, dev: cfg.deviceName, kind: "link", mime: "text/uri-list", ts: Proto.nowMs(), data: Data(url.utf8), to: dev)
+        guard let frame = ClipCodec.encode(item, secret: cfg.secret) else { return }
+        remember(id)
+        let links = deliver(frame, kind: "link", to: [dev])
+        guard !links.isEmpty else { onEvent?("\(DeviceName.pretty(dev)) is not in reach"); return }
+        receipts.track(id, targets: [dev], now: Date())
+        outbox[id] = (frame, "link", Date())
+        Log.write("link: sent to \(dev)")
+        onRecord?(ClipRecent(clipId: id, receipt: "Sending to \(DeviceName.pretty(dev))", sent: true, dev: DeviceName.pretty(dev), kind: "link", text: url))
+        onEvent?("Opening on \(DeviceName.pretty(dev))")
+    }
+
+    /// A link from another device: opened at once in the default browser (web links only).
+    private func openLink(_ item: ClipItem) {
+        guard let s = String(data: item.data, encoding: .utf8), let u = URL(string: s), ["http", "https"].contains(u.scheme?.lowercased() ?? "") else { return }
+        NSWorkspace.shared.open(u)
+        Log.write("link: opened a link from \(item.dev)")
+        sendControl(kind: "ack", data: Data(item.id.utf8), to: item.dev)
+        onRecord?(ClipRecent(clipId: item.id, sent: false, dev: DeviceName.pretty(item.dev), kind: "link", text: s))
     }
 
     /// Asks every device for its diagnostics; replies arrive through onDiagnostics.
@@ -639,7 +761,7 @@ final class ClipSync {
     private func receive(_ frame: Data, via: String) {
         guard let item = ClipCodec.decode(frame, secret: cfg.secret) else { return }
         // Receipts and diagnostics work whatever the clipboard settings; clips only when receiving is on.
-        let content = item.kind == "text" || item.kind == "image"
+        let content = item.kind == "text" || item.kind == "image" || item.kind == "link"
         guard !content || (cfg.clipSync && cfg.clipReceive && !paused) else { return }
         // Within 5 minutes by the sender's own clock (its offset is learned from its status), so clocks may differ.
         guard item.dev != cfg.deviceName,
@@ -665,8 +787,12 @@ final class ClipSync {
                 self.sendControl(kind: "diag", data: Data(self.diagnostics().utf8), to: item.dev)
             case "diag":
                 self.onDiagnostics?(item.dev, String(data: item.data, encoding: .utf8) ?? "")
-            default:
+            case "link":
+                self.openLink(item)
+            case "text", "image":
                 self.apply(item, via: via)
+            default:
+                self.onControl?(item)
             }
         }
     }

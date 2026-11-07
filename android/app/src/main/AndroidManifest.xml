@@ -79,6 +79,17 @@
         </receiver>
 
         <receiver android:name=".EarActionReceiver" android:exported="false" />
+        <!-- Tasker and other apps; refused unless "Allow other apps to control EarHop" is on. -->
+        <receiver android:name=".AutomationReceiver" android:exported="true">
+            <intent-filter>
+                <action android:name="com.earhop.logger.action.TAKE" />
+                <action android:name="com.earhop.logger.action.RELEASE" />
+                <action android:name="com.earhop.logger.action.SEND_CLIPBOARD" />
+                <action android:name="com.earhop.logger.action.SEND_TEXT" />
+                <action android:name="com.earhop.logger.action.SLEEP" />
+                <action android:name="com.earhop.logger.action.SLEEP_CANCEL" />
+            </intent-filter>
+        </receiver>
         <!-- Shizuku (Apache-2.0): receives Shizuku's binder, so EarHop can start the clipboard helper without a computer. -->
         <provider
             android:name="rikka.shizuku.ShizukuProvider"
@@ -153,16 +164,26 @@
             android:excludeFromRecents="true"
             android:taskAffinity=""
             android:label="Send to my devices"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+
+        <!-- Share, EarHop: files and photos (Wi-Fi, any size), links (open on a device) and text (clipboard). The
+             direct share targets "Send to Mac" and so on are published by ShareTargets. -->
+        <activity
+            android:name=".ShareActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:taskAffinity=""
+            android:label="Send with EarHop"
             android:theme="@android:style/Theme.Translucent.NoTitleBar">
             <intent-filter>
                 <action android:name="android.intent.action.SEND" />
                 <category android:name="android.intent.category.DEFAULT" />
-                <data android:mimeType="text/plain" />
+                <data android:mimeType="*/*" />
             </intent-filter>
             <intent-filter>
-                <action android:name="android.intent.action.SEND" />
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
                 <category android:name="android.intent.category.DEFAULT" />
-                <data android:mimeType="image/*" />
+                <data android:mimeType="*/*" />
             </intent-filter>
         </activity>
 

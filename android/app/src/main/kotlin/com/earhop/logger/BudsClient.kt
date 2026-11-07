@@ -88,8 +88,13 @@ class BudsClient(private val ctx: Context, private val filter: () -> String, pri
         return true
     }
 
-    fun setNoise(mode: String) = send(BudsProtocol.noiseCommand(mode))
-    fun setEq(preset: String) = send(BudsProtocol.eqCommand(preset))
+    /** The user picked a noise mode or equalizer here: remembered as this device's own ("noise" or "eq"). */
+    @Volatile var onUserChoice: ((String, String) -> Unit)? = null
+    /** When the channel opens: this device's own noise mode and equalizer to apply, if any. */
+    @Volatile var ownSettings: () -> Pair<String?, String?> = { Pair(null, null) }
+
+    fun setNoise(mode: String) = send(BudsProtocol.noiseCommand(mode)).also { if (it) onUserChoice?.invoke("noise", mode) }
+    fun setEq(preset: String) = send(BudsProtocol.eqCommand(preset)).also { if (it) onUserChoice?.invoke("eq", preset) }
     fun setSpatial(on: Boolean) = send(BudsProtocol.spatialCommand(on))
     fun setSeamless(on: Boolean) = send(BudsProtocol.seamlessCommand(on))
     fun setTouch(on: Boolean) = send(BudsProtocol.touchCommand(on, snapshot()))
@@ -174,6 +179,13 @@ class BudsClient(private val ctx: Context, private val filter: () -> String, pri
                         failures = 0
                         EhState.buds = "connected"
                         EhLog.w("buds: wear channel open")
+                        // Separate settings per device: this device's own noise control and equalizer.
+                        val own = ownSettings()
+                        Thread {
+                            try { Thread.sleep(1500) } catch (e: InterruptedException) { }
+                            own.first?.let { send(BudsProtocol.noiseCommand(it)); EhLog.w("buds: applied this device's noise control $it") }
+                            own.second?.let { send(BudsProtocol.eqCommand(it)); EhLog.w("buds: applied this device's equalizer $it") }
+                        }.start()
                     } catch (e: Exception) {
                         failures++
                         EhState.buds = "refused (${e.message ?: e.javaClass.simpleName})" +

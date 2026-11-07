@@ -33,6 +33,8 @@ final class Controller {
     private var peers: [String: Peer] = [:]
     /// Set by the app before each tick: speaker fallback has the sound on the Mac's speakers.
     var onSpeaker = false
+    /// Set by the app before each tick: the user was active on this Mac in the last 30 s.
+    var attention = false
     /// When a device's copies were last refused because they were far off its clock offset (for the status page).
     private(set) var clockRefused: [String: Date] = [:]
     private let lock = NSLock()
@@ -63,6 +65,7 @@ final class Controller {
         s.deviceName = c.deviceName
         s.priority = c.priority
         s.live = c.liveMode
+        s.followAttention = c.followAttention
         s.cooldown = c.cooldownSeconds
         s.minPlay = max(c.debounceSeconds, c.minPlaySeconds)
         s.quiet = c.quietSeconds
@@ -126,7 +129,8 @@ final class Controller {
         lock.lock(); defer { lock.unlock() }
         return peers.values.map {
             HandoffPeer(name: $0.status.dev, playing: $0.status.playing, ear: $0.status.ear, owner: $0.status.owner,
-                        call: $0.status.call, seenAt: $0.seenAt, playingSince: $0.playingSince, lastPlayingAt: $0.lastPlayingAt)
+                        call: $0.status.call, seenAt: $0.seenAt, playingSince: $0.playingSince, lastPlayingAt: $0.lastPlayingAt,
+                        att: $0.status.att)
         }
     }
 
@@ -309,7 +313,7 @@ final class Controller {
         if autoOff { return }
 
         let input = HandoffInput(now: Date(), playing: playing, ear: ear, owner: owner, inCall: inCall,
-                                 peers: handoffPeers(), gate: autoGate(), onSpeaker: onSpeaker)
+                                 peers: handoffPeers(), gate: autoGate(), onSpeaker: onSpeaker, attention: attention)
         let list = core.tick(input)
         if core.phase != lastPhase || !list.isEmpty {
             let acts = list.map { "\($0)" }.joined(separator: "; ")

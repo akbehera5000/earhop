@@ -223,6 +223,19 @@ struct PopoverView: View {
             .glassButton()
             .disabled(!state.owner || switching)
             .accessibilityLabel("Release the \(state.cfg.earbudsShort)")
+
+            // Sleep timer: pause and let go of the earbuds after a while.
+            Menu {
+                if state.sleepUntil > Date() {
+                    Text("Pauses and releases at \(state.sleepUntil.formatted(date: .omitted, time: .shortened))")
+                    Button("Cancel the sleep timer") { state.onSleep?(0) }
+                    Divider()
+                }
+                ForEach([15, 30, 45, 60, 90], id: \.self) { m in Button("In \(m) minutes") { state.onSleep?(m) } }
+            } label: { Image(systemName: state.sleepUntil > Date() ? "moon.zzz.fill" : "moon.zzz") }
+                .menuStyle(.borderlessButton).fixedSize()
+                .help(state.sleepUntil > Date() ? "Sleep timer: \(state.sleepUntil.formatted(date: .omitted, time: .shortened))" : "Sleep timer")
+                .accessibilityLabel("Sleep timer")
         }
         .controlSize(.large)
     }

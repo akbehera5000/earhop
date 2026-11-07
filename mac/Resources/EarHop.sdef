@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE dictionary SYSTEM "file://localhost/System/Library/DTDs/sdef.dtd">
+<dictionary title="EarHop Terminology">
+    <suite name="EarHop Suite" code="EHop" description="Control EarHop: earbuds, clipboard and the sleep timer.">
+        <command name="take earbuds" code="EHopTake" description="Connect the earbuds to this Mac.">
+            <cocoa class="EHScriptCommand"/>
+            <result type="boolean"/>
+        </command>
+        <command name="release earbuds" code="EHopRels" description="Let go of the earbuds.">
+            <cocoa class="EHScriptCommand"/>
+            <result type="boolean"/>
+        </command>
+        <command name="send clipboard" code="EHopClip" description="Send this Mac's clipboard to your other devices.">
+            <cocoa class="EHScriptCommand"/>
+            <result type="boolean"/>
+        </command>
+        <command name="start sleep timer" code="EHopSlep" description="Pause and release the earbuds after some minutes.">
+            <cocoa class="EHScriptCommand"/>
+            <direct-parameter type="integer" optional="yes" description="Minutes (default: the last length used)."/>
+            <result type="boolean"/>
+        </command>
+        <command name="cancel sleep timer" code="EHopSlpC" description="Cancel the sleep timer.">
+            <cocoa class="EHScriptCommand"/>
+            <result type="boolean"/>
+        </command>
+    </suite>
+</dictionary>

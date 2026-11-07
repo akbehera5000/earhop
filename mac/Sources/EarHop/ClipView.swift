@@ -74,6 +74,11 @@ struct ClipRecentRow: View {
                 }
                 Spacer(minLength: 4)
                 Text(r.sent ? "to \(r.dev)" : "from \(r.dev)").font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                if r.text != nil, r.kind != "image" {
+                    Button { togglePin() } label: { Image(systemName: isPinned ? "pin.fill" : "pin") }
+                        .buttonStyle(.plain).help(isPinned ? "Unpin" : "Pin: keep it, also after a restart")
+                        .accessibilityLabel(isPinned ? "Unpin" : "Pin")
+                }
                 Text(r.date, style: .time).font(.caption2).foregroundStyle(.secondary)
             }
             .contentShape(Rectangle())
@@ -82,8 +87,18 @@ struct ClipRecentRow: View {
         .help("Copy this again")
         .accessibilityLabel("\(r.sent ? "Sent" : "Received") \(preview), \(r.sent ? "to" : "from") \(r.dev). \(r.receipt) Copy again.")
     }
+    private var isPinned: Bool { state.clipPinned.contains { $0.text == r.text && $0.kind == r.kind } }
+
+    private func togglePin() {
+        if isPinned { state.clipPinned.removeAll { $0.text == r.text && $0.kind == r.kind } }
+        else { var p = r; p.pinned = true; state.clipPinned.insert(p, at: 0) }
+        state.onPinsChanged?()
+    }
+
     private var preview: String {
         if r.kind == "image" { return "Image" }
+        if r.kind == "file" { return "File: " + (r.text ?? "") }
+        if r.kind == "link" { return "Link: " + (r.text ?? "") }
         let t = (r.text ?? "").replacingOccurrences(of: "\n", with: " ").trimmingCharacters(in: .whitespaces)
         return t.isEmpty ? "Text" : t
     }
@@ -112,6 +127,22 @@ struct PauseMenu: View {
 /// Popover card: on or off, the method with live links, recent clips, Send now and Pause.
 struct ClipCard: View {
     @ObservedObject var state: AppState
+
+    private var devices: [String] { state.peers.map(\.name).filter { $0 != state.cfg.deviceName }.sorted() }
+    private var copiedLink: Bool {
+        let s = (NSPasteboard.general.string(forType: .string) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        return s.hasPrefix("http://") || s.hasPrefix("https://")
+    }
+
+    private func pickFiles(to dev: String?) {
+        let p = NSOpenPanel()
+        p.allowsMultipleSelection = true
+        p.canChooseDirectories = false
+        p.prompt = "Send"
+        p.message = dev.map { "Send to \(DeviceName.pretty($0)) over Wi-Fi" } ?? "Send to your other devices over Wi-Fi"
+        NSApp.activate(ignoringOtherApps: true)
+        if p.runModal() == .OK, !p.urls.isEmpty { state.onSendFiles?(p.urls, dev) }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -144,6 +175,20 @@ struct ClipCard: View {
                     Toggle("Auto", isOn: $state.cfg.clipAuto)
                         .toggleStyle(.switch).controlSize(.mini)
                         .help("Send copies automatically")
+                    Menu {
+                        Button("Send files…") { pickFiles(to: nil) }
+                        ForEach(devices, id: \.self) { d in Button("Send files to \(DeviceName.pretty(d))…") { pickFiles(to: d) } }
+                        Divider()
+                        ForEach(devices, id: \.self) { d in
+                            Button("Open copied link on \(DeviceName.pretty(d))") {
+                                if let s = NSPasteboard.general.string(forType: .string) { state.onSendLink?(s.trimmingCharacters(in: .whitespacesAndNewlines), d) }
+                            }
+                            .disabled(!copiedLink)
+                        }
+                    } label: { Image(systemName: "ellipsis.circle") }
+                        .menuStyle(.borderlessButton).fixedSize()
+                        .help("Send files, or open the copied link on another device")
+                        .accessibilityLabel("More: send files or open a link on another device")
                     Spacer(minLength: 0)
                     PauseMenu(paused: state.clipPaused, what: "clipboard sync") { until in
                         state.clipPausedUntil = until
@@ -169,6 +214,13 @@ struct ClipCard: View {
 
 /// Settings, Clipboard.
 struct ClipboardPage: View {
+    private func matches(_ r: ClipRecent) -> Bool {
+        let q = state.clipSearch.trimmingCharacters(in: .whitespaces)
+        return q.isEmpty || (r.text ?? "").localizedCaseInsensitiveContains(q) || r.dev.localizedCaseInsensitiveContains(q)
+    }
+    private var pinnedShown: [ClipRecent] { state.clipPinned.filter(matches) }
+    private var recentShown: [ClipRecent] { Array(state.clipRecent.filter(matches).prefix(50)) }
+
     static func appName(_ bundleId: String) -> String {
         if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleId) {
             return FileManager.default.displayName(atPath: url.path).replacingOccurrences(of: ".app", with: "")
@@ -253,15 +305,20 @@ struct ClipboardPage: View {
             } header: { Text("Send to") }
             .disabled(!state.cfg.clipSync)
             Section {
-                Picker("Keep in the menu", selection: $state.cfg.clipHistory) {
-                    Text("Off").tag(0); Text("5 clips").tag(5); Text("10 clips").tag(10); Text("20 clips").tag(20)
+                TextField("Search clips", text: $state.clipSearch)
+                if !pinnedShown.isEmpty {
+                    Text("Pinned").font(.caption).foregroundStyle(.secondary)
+                    ForEach(pinnedShown) { r in ClipRecentRow(state: state, r: r) }
                 }
-                ForEach(state.clipRecent.prefix(8)) { r in ClipRecentRow(state: state, r: r) }
+                Picker("Keep in history", selection: $state.cfg.clipHistory) {
+                    Text("Off").tag(0); Text("5 clips").tag(5); Text("10 clips").tag(10); Text("20 clips").tag(20); Text("50 clips").tag(50)
+                }
+                ForEach(recentShown) { r in ClipRecentRow(state: state, r: r) }
                 if !state.clipRecent.isEmpty {
                     Button("Clear recent clips") { state.clipRecent = [] }
                 }
-            } header: { Text("Recent clips") } footer: {
-                Text("Kept in memory only, never saved to disk, and gone when EarHop quits. Click one to copy it again.")
+            } header: { Text("History") } footer: {
+                Text("History is kept in memory only and is gone when EarHop quits. Pinned clips (the pin button) are kept, encrypted with your shared secret. Click a clip to copy it again.")
             }
             .disabled(!state.cfg.clipSync)
             Section {

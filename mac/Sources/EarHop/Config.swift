@@ -59,6 +59,22 @@ struct Config: Codable, Equatable {
     /// Skip text that looks like a password (one word, 8 to 64 characters, at least 3 kinds of characters). Off by
     /// default: such text is synced. Items password managers mark as concealed are never sent either way.
     var clipSkipPasswords: Bool = false
+    /// Follow my attention: audio started on the device you just unlocked or typed on wins over a busy owner.
+    var followAttention: Bool = false
+    /// Low battery alerts at 20 % and 10 % for each bud and the case, on every device.
+    var lowBatteryAlerts: Bool = true
+    /// When the earbuds move here, set this Mac's volume to the one the previous device used.
+    var volumeHandover: Bool = true
+    /// Galaxy Buds: apply this Mac's own noise control and equalizer whenever the Buds connect here.
+    var ownBudsSettings: Bool = true
+    var budsNoise: String = ""
+    var budsEq: String = ""
+    /// The sleep timer's length in minutes.
+    var sleepMinutes: Int = 30
+    /// When each shared setting was last changed (SettingsSync), in this Mac's clock.
+    var settingsStamps: [String: Int64] = [:]
+    /// Apps whose audio counts as a call at once (meetings come before music).
+    var meetingApps: [String] = ["us.zoom.xos", "net.whatsapp.WhatsApp", "desktop.WhatsApp", "com.microsoft.teams2", "com.microsoft.teams"]
     /// Apps (bundle identifiers) whose copies are never sent automatically.
     var clipExcludeApps: [String] = []
     /// Every device name seen so far (besides mac, phone and tab), so Bluetooth LE ids are known after a restart.
@@ -109,6 +125,10 @@ struct Config: Codable, Equatable {
         opt(.clipNotify, &base.clipNotify); opt(.clipHistory, &base.clipHistory)
         opt(.clipSkipPasswords, &base.clipSkipPasswords); opt(.knownDevices, &base.knownDevices)
         opt(.clipExcludeApps, &base.clipExcludeApps)
+        opt(.followAttention, &base.followAttention); opt(.lowBatteryAlerts, &base.lowBatteryAlerts)
+        opt(.volumeHandover, &base.volumeHandover); opt(.ownBudsSettings, &base.ownBudsSettings)
+        opt(.budsNoise, &base.budsNoise); opt(.budsEq, &base.budsEq); opt(.meetingApps, &base.meetingApps)
+        opt(.sleepMinutes, &base.sleepMinutes); opt(.settingsStamps, &base.settingsStamps)
         opt(.autoSwitch, &base.autoSwitch); opt(.earbudsMode, &base.earbudsMode); opt(.speakerFallback, &base.speakerFallback)
         self = base
     }

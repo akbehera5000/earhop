@@ -1,5 +1,22 @@
+import AudioToolbox
 import CoreAudio
 import Foundation
+
+/// Low battery alerts: at 20 % and again at 10 % for each part (left, right, case), once each until it charges or
+/// rises above 25 %. Same rule as BatteryAlerts in EarPolicy.kt. Pure, tested by the self test.
+struct BatteryAlerts {
+    private var fired: [String: Int] = [:]
+
+    /// The threshold just crossed (20 or 10) for this part, or nil.
+    mutating func update(_ part: String, level: Int, charging: Bool) -> Int? {
+        guard level >= 0 else { return nil }
+        if charging || level > 25 { fired[part] = nil; return nil }
+        let f = fired[part] ?? 101
+        if level <= 10 && f > 10 { fired[part] = 10; return 10 }
+        if level <= 20 && f > 20 { fired[part] = 20; return 20 }
+        return nil
+    }
+}
 
 /// Speaker fallback: with the earbuds connected but out of your ears, audio you play comes from the Mac's built-in
 /// speakers; putting a bud back in moves the sound to the earbuds again without stopping playback.
@@ -108,6 +125,22 @@ enum OutputRoute {
         var dev = id
         let r = AudioObjectSetPropertyData(AudioObjectID(kAudioObjectSystemObject), &a, 0, nil, UInt32(MemoryLayout<AudioDeviceID>.size), &dev)
         return r == noErr && defaultOutput == id
+    }
+
+    /// The default output's volume, 0 to 1 (nil when the device has no volume control).
+    static var volume: Float? {
+        get {
+            var a = prop(kAudioHardwareServiceDeviceProperty_VirtualMainVolume, kAudioObjectPropertyScopeOutput)
+            var v = Float32(0)
+            var size = UInt32(MemoryLayout<Float32>.size)
+            return AudioObjectGetPropertyData(defaultOutput, &a, 0, nil, &size, &v) == noErr ? v : nil
+        }
+        set {
+            guard let n = newValue else { return }
+            var a = prop(kAudioHardwareServiceDeviceProperty_VirtualMainVolume, kAudioObjectPropertyScopeOutput)
+            var v = Float32(min(1, max(0, n)))
+            AudioObjectSetPropertyData(defaultOutput, &a, 0, nil, UInt32(MemoryLayout<Float32>.size), &v)
+        }
     }
 
     static func toSpeakers() -> Bool {

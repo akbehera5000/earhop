@@ -67,12 +67,16 @@ class ClipTcp(private val port: Int = PORT, private val onFrame: (ByteArray) -> 
         }, "earhop-clip-tcp").start()
     }
 
+    /** A file stream arrived: handled by the clipboard sync (checks the header, saves the file). */
+    @Volatile var onFileStream: ((DataInputStream) -> Unit)? = null
+
     private fun serve(c: Socket) {
         try {
             c.soTimeout = 10_000 // the length must arrive within 10 s
-            val inp = DataInputStream(c.getInputStream())
+            val inp = DataInputStream(c.getInputStream().buffered(1 shl 16))
             val len = inp.readInt()
             c.soTimeout = 30_000
+            if (len == FileStream.MAGIC_INT) { onFileStream?.invoke(inp); return }
             if (len in 1..MAX_FRAME) { val b = ByteArray(len); inp.readFully(b); onFrame(b) }
         } catch (e: Exception) { } finally { try { c.close() } catch (e: Exception) { } }
     }
@@ -335,6 +339,8 @@ object ClipSync {
     val receipts = Receipts()
     /** Sent clips kept for a quiet retry until every device confirmed them (at most a minute). */
     private val outbox = java.util.concurrent.ConcurrentHashMap<String, Pair<ByteArray, String>>()
+    /** Other control messages (battery, notices, volume, settings), handled by the service. */
+    @Volatile var onControl: ((Context, ClipItem) -> Unit)? = null
     /** A diagnostics reply arrived: (device, text). Set by the screen while it collects. */
     @Volatile var onDiagnostics: ((String, String) -> Unit)? = null
     fun pretty(n: String) = when (n) { "mac" -> "Mac"; "phone" -> "Phone"; "tab" -> "Tablet"; else -> n.replaceFirstChar { it.uppercase() } }
@@ -343,7 +349,44 @@ object ClipSync {
     private fun addRecent(ctx: Context, r: Recent) {
         if (!keepRecent(ctx)) return
         recent.add(0, r)
-        while (recent.size > 10) recent.removeAt(recent.size - 1)
+        while (recent.size > 50) recent.removeAt(recent.size - 1)
+    }
+
+    // ---------- pinned clips: the only ones saved, encrypted with the shared secret ----------
+
+    val pinned = java.util.concurrent.CopyOnWriteArrayList<Recent>()
+    private fun pinFile(ctx: Context) = File(ctx.filesDir, "pins.bin")
+
+    fun loadPins(ctx: Context) {
+        pinned.clear()
+        try {
+            val f = pinFile(ctx); if (!f.exists()) return
+            val item = ClipCodec.decode(f.readBytes(), prefs(ctx).getString("secret", "") ?: "") ?: return
+            val arr = org.json.JSONArray(String(item.data, Charsets.UTF_8))
+            for (i in 0 until arr.length()) {
+                val o = arr.getJSONObject(i)
+                pinned.add(Recent(o.optLong("at"), o.optBoolean("sent"), o.optString("dev"), o.optString("kind", "text"), o.optString("text"), o.optString("text").length))
+            }
+        } catch (e: Exception) { EhLog.w("clip: pinned clips not read: ${e.message}") }
+    }
+
+    private fun savePins(ctx: Context) {
+        try {
+            val arr = org.json.JSONArray()
+            for (r in pinned) arr.put(org.json.JSONObject().put("at", r.at).put("sent", r.sent).put("dev", r.dev).put("kind", r.kind).put("text", r.text ?: ""))
+            val frame = ClipCodec.encode(ClipItem("pins", "", "pins", "application/json", System.currentTimeMillis(), arr.toString().toByteArray()),
+                prefs(ctx).getString("secret", "") ?: "") ?: return
+            pinFile(ctx).writeBytes(frame)
+        } catch (e: Exception) { EhLog.w("clip: pinned clips not saved: ${e.message}") }
+    }
+
+    fun isPinned(r: Recent) = pinned.any { it.text == r.text && it.kind == r.kind }
+
+    /** Pins or unpins a text, link or file name. */
+    fun togglePin(ctx: Context, r: Recent) {
+        if (r.text == null || r.kind == "image") return
+        if (isPinned(r)) pinned.removeAll { it.text == r.text && it.kind == r.kind } else pinned.add(0, Recent(r.at, r.sent, r.dev, r.kind, r.text, r.size))
+        savePins(ctx)
     }
 
     /** Puts a recent text back on this clipboard without sending it again. */
@@ -356,8 +399,10 @@ object ClipSync {
 
     fun start(ctx: Context) {
         val app = ctx.applicationContext
+        loadPins(app)
         tcp = ClipTcp { f -> receive(app, f, "Wi-Fi") }.also {
             it.allowed = { a -> a in EhState.wifiPeers(emptySet()) }
+            it.onFileStream = { inp -> receiveFile(app, inp) }
             it.start()
         }
         val p0 = prefs(app)
@@ -454,6 +499,50 @@ object ClipSync {
         val frame = ClipCodec.encode(item, p.getString("secret", "") ?: "") ?: return
         remember(id)
         Thread { deliver(ctx, frame, kind, to?.let { setOf(it) }) }.start()
+    }
+
+    /** An incoming file stream: checks the header like a clip, saves the file in Downloads and confirms it. */
+    private fun receiveFile(ctx: Context, inp: DataInputStream) {
+        val p = prefs(ctx)
+        val secret = p.getString("secret", "") ?: ""
+        val hl = inp.readInt()
+        if (hl !in 1..65535) return
+        val h = ByteArray(hl); inp.readFully(h)
+        val item = ClipCodec.decode(h, secret) ?: return
+        val self = p.getString("name", "phone")
+        if (item.kind != "file" || item.dev == self || (item.to.isNotEmpty() && item.to != self)) return
+        if (!enabled(ctx) || !receiving(ctx) || paused(ctx)) return
+        if (!ClockGuard.shared.fresh(item.dev, item.ts, System.currentTimeMillis(), ClipCodec.MAX_AGE_MS)) return
+        val saved = FileShare.receive(ctx, item, inp, secret)
+        if (saved == null) { EhLog.w("file: a file from ${item.dev} broke off"); return }
+        EhLog.w("file: received $saved from ${item.dev}")
+        sendControl(ctx, "ack", item.id.toByteArray(), item.dev)
+        addRecent(ctx, Recent(System.currentTimeMillis(), false, item.dev, "file", saved, 0, item.id))
+        event("Received $saved from ${item.dev}")
+    }
+
+    /** Records a sent file or link for the recent list and its receipts. */
+    fun trackSent(ctx: Context, id: String, targets: Set<String>, kind: String, text: String) {
+        val now = System.currentTimeMillis()
+        receipts.track(id, targets, now)
+        addRecent(ctx, Recent(now, true, "", kind, text, text.length, id).also {
+            if (targets.isNotEmpty()) it.receipt = "Sending to " + targets.sorted().joinToString(", ") { t -> pretty(t) }
+        })
+    }
+
+    /** Opens a web link on one device ("continue on"). Returns false when that device is not in reach. */
+    fun sendLink(ctx: Context, url: String, dev: String): Boolean {
+        val p = prefs(ctx)
+        val id = (1..8).joinToString("") { "%02x".format(java.util.Random().nextInt(256)) }
+        val item = ClipItem(id, p.getString("name", "phone") ?: "phone", "link", "text/uri-list", System.currentTimeMillis(), url.toByteArray(), dev)
+        val frame = ClipCodec.encode(item, p.getString("secret", "") ?: "") ?: return false
+        remember(id)
+        val links = deliver(ctx, frame, "link", setOf(dev))
+        if (links.isEmpty()) return false
+        outbox[id] = Pair(frame, "link")
+        trackSent(ctx, id, setOf(dev), "link", url)
+        EhLog.w("link: sent to $dev")
+        return true
     }
 
     /** Asks every device for its diagnostics; replies arrive through [onDiagnostics]. */
@@ -748,7 +837,7 @@ object ClipSync {
         val self = p.getString("name", "phone")
         if (item.dev == self || (item.to.isNotEmpty() && item.to != self)) return
         // Receipts and diagnostics work whatever the clipboard settings; clips only when receiving is on.
-        val content = item.kind == "text" || item.kind == "image"
+        val content = item.kind == "text" || item.kind == "image" || item.kind == "link"
         if (content && (!enabled(ctx) || !receiving(ctx) || paused(ctx))) return
         // Within 5 minutes by the sender's own clock (its offset is learned from its status), so clocks may differ.
         if (!ClockGuard.shared.fresh(item.dev, item.ts, System.currentTimeMillis(), ClipCodec.MAX_AGE_MS)) return
@@ -771,7 +860,14 @@ object ClipSync {
                 sendControl(ctx, "diag", diagnosticsPart(ctx).toByteArray(), item.dev)
             }
             "diag" -> onDiagnostics?.invoke(item.dev, String(item.data, Charsets.UTF_8))
-            else -> main.post { apply(ctx, item, via) }
+            "link" -> {
+                val url = String(item.data, Charsets.UTF_8)
+                FileShare.showLink(ctx, item.dev, url)
+                sendControl(ctx, "ack", item.id.toByteArray(), item.dev)
+                addRecent(ctx, Recent(System.currentTimeMillis(), false, item.dev, "link", url, url.length, item.id))
+            }
+            "text", "image" -> main.post { apply(ctx, item, via) }
+            else -> onControl?.invoke(ctx, item)
         }
     }
 

@@ -285,6 +285,17 @@ private struct HandoffPage: View {
                 Text("Only medium or high confidence ear readings pause or resume playback. A reading kept from a closed Buds channel is low confidence.")
             }
             Section {
+                Toggle("Follow my attention", isOn: $state.cfg.followAttention)
+                Toggle("Keep the same volume when the earbuds move", isOn: $state.cfg.volumeHandover)
+                Toggle("Low battery alerts (20 % and 10 %)", isOn: $state.cfg.lowBatteryAlerts)
+                Toggle("Meeting apps count as calls", isOn: $state.cfg.detectCalls)
+                Picker("Sleep timer length", selection: $state.cfg.sleepMinutes) {
+                    ForEach([15, 30, 45, 60, 90], id: \.self) { Text("\($0) minutes").tag($0) }
+                }
+            } header: { Text("Extras") } footer: {
+                Text("Follow my attention: when you unlocked this Mac or typed in the last 30 s and audio starts here, the earbuds come here even if another device is still playing (and leave when you move to another device). Meetings: sound from Zoom, WhatsApp or Teams counts as a call at once, so it comes before music; other calls are noticed when the microphone and speaker are busy for 2 s. These settings, and the clipboard ones, are shared with your other devices: change them on one, they change everywhere.")
+            }
+            Section {
                 slider("Playing before claim", $state.cfg.debounceSeconds, 0.5 ... 10, step: 0.5)
                 slider("Ignore sounds shorter than", $state.cfg.minPlaySeconds, 0 ... 10, step: 0.5)
                 slider("Cooldown between handoffs", $state.cfg.cooldownSeconds, 1 ... 30, step: 1)
@@ -546,6 +557,8 @@ private struct BudsPage: View {
                     LabeledContent("Case") { Text(pct(b.battCase)) }
                 }
                 Section {
+                    Toggle("Use this Mac's own noise control and equalizer", isOn: $state.cfg.ownBudsSettings)
+                        .help("What you choose here is applied whenever the Buds connect to this Mac; each device keeps its own.")
                     choice("Noise control", [("off", "Off"), ("anc", "Noise cancelling"), ("ambient", "Ambient sound")], b.noise) { link.setNoise($0) }
                     choice("Equalizer", [("off", "Off"), ("bass", "Bass boost"), ("soft", "Soft"), ("dynamic", "Dynamic"), ("clear", "Clear"), ("treble", "Treble boost")], b.eq) { link.setEq($0) }
                 } header: { Text("Sound") } footer: {

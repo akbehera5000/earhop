@@ -107,3 +107,21 @@ class SpeakerPolicy {
         return if (enabled && owner && !call && out && started && now - outSince >= 1500) Action.TO_SPEAKER else null
     }
 }
+
+/**
+ * Low battery alerts: at 20 % and again at 10 % for each part (left, right, case), once each until it charges or rises
+ * above 25 %. Same rule as BatteryAlerts in SpeakerFallback.swift. Pure, unit tested.
+ */
+class BatteryAlerts {
+    private val fired = HashMap<String, Int>()
+
+    /** The threshold just crossed (20 or 10) for this part, or null. */
+    fun update(part: String, level: Int, charging: Boolean): Int? {
+        if (level < 0) return null
+        if (charging || level > 25) { fired.remove(part); return null }
+        val f = fired[part] ?: 101
+        if (level <= 10 && f > 10) { fired[part] = 10; return 10 }
+        if (level <= 20 && f > 20) { fired[part] = 20; return 20 }
+        return null
+    }
+}

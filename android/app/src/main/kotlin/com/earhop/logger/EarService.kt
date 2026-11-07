@@ -34,6 +34,7 @@ class EarService : Service() {
     private var netCallback: android.net.ConnectivityManager.NetworkCallback? = null
     private var btReceiver: android.content.BroadcastReceiver? = null
     private var lastStateLine = ""
+    private var extras: Extras? = null
     private val startedAt = System.currentTimeMillis()
     /** The active earbuds; both can change while running (see detectEarbuds). */
     @Volatile private var useBuds = false
@@ -137,6 +138,7 @@ class EarService : Service() {
         EhState.wifiPeers = { skip -> link?.peerHostsExcept(skip) ?: emptyList() }
         EhState.wifiHostsOf = { dev -> link?.hostsOf(dev) ?: emptyList() }
         try { ClipSync.start(this) } catch (e: Exception) { EhLog.w("clip: start failed ${e.message}") }
+        extras = Extras(this).also { x -> ClipSync.onControl = { _, item -> x.onControl(item) } }
         ble?.onRecovered = { ClipSync.restartGatt() }
 
         // When Android's Bluetooth is switched off and on (or its process restarts), every scan and the clipboard
@@ -144,6 +146,7 @@ class EarService : Service() {
         try {
             val r = object : android.content.BroadcastReceiver() {
                 override fun onReceive(c: Context, i: Intent) {
+                    if (i.action == Intent.ACTION_USER_PRESENT) { unlockedAt = System.currentTimeMillis(); return }
                     val st = i.getIntExtra(android.bluetooth.BluetoothAdapter.EXTRA_STATE, -1)
                     if (st == android.bluetooth.BluetoothAdapter.STATE_ON) {
                         EhLog.w("bluetooth: on again, setting up scans and the clipboard service")
@@ -152,6 +155,7 @@ class EarService : Service() {
                 }
             }
             val f = android.content.IntentFilter(android.bluetooth.BluetoothAdapter.ACTION_STATE_CHANGED)
+            f.addAction(Intent.ACTION_USER_PRESENT)
             if (Build.VERSION.SDK_INT >= 33) registerReceiver(r, f, Context.RECEIVER_EXPORTED) else registerReceiver(r, f)
             btReceiver = r
         } catch (e: Exception) { EhLog.w("bluetooth: state receiver failed ${e.message}") }
@@ -196,19 +200,24 @@ class EarService : Service() {
                     // Send at once when something changed, otherwise once a second as a heartbeat.
                     // Stale audio right after letting go is not announced as playing (see HandoffCore.advertisedPlaying).
                     val shown = controller?.core?.advertisedPlaying(playing) ?: playing
-                    val key = "$shown|$ear|$owner|$call|$useBuds"
+                    val key = "$shown|$ear|$owner|$call|$useBuds|${attention()}"
                     val now = System.currentTimeMillis()
                     if (key != lastKey || now - lastSendAt >= 1000) {
                         lastKey = key
                         lastSendAt = now
                         seq++
-                        val st = Status(name, now, seq, shown, ear, owner, call, if (useBuds) "buds" else "airpods")
+                        val st = Status(name, now, seq, shown, ear, owner, call, if (useBuds) "buds" else "airpods", att = attention())
                         sendStatus(st)
                     }
+                    extras?.let { x -> x.batteryTick(); x.volumeTick(owner); x.settingsTick(); x.sleepTick(owner, controller) }
                     controller?.onSpeaker = speaker.onSpeaker
+                    controller?.attention = attention()
                     controller?.tick(playing, reading, owner, call, EhState.peers.values, AppRules.preferredPlaying(this))
                     speakerTick(playing, reading, owner, call)
-                    if (now - lastEarbudCheck >= 2000) { lastEarbudCheck = now; detectEarbuds() }
+                    if (now - lastEarbudCheck >= 2000) {
+                        lastEarbudCheck = now; detectEarbuds()
+                        ShareTargets.publish(this, EhState.peers.keys.filter { it != name }.sorted())
+                    }
                     updateNotification()
                     // Only when it changes (and once every 10 minutes): a line every 5 s used up the log quota on phones
                     // that rate limit app logs, and the lines that matter were dropped.
@@ -290,6 +299,10 @@ class EarService : Service() {
         return rows
     }
 
+    @Volatile private var unlockedAt = 0L
+    /** Follow my attention: the user unlocked this device in the last 30 s (Android tells apps about unlocking only). */
+    private fun attention(): Boolean = System.currentTimeMillis() - unlockedAt < 30_000
+
     /** Sets up everything that registers with Android's Bluetooth again, after it came back on. */
     private fun recoverBluetooth() {
         try { ble?.restart("Bluetooth came back") } catch (e: Exception) { EhLog.w("ble restart failed: ${e.message}") }
@@ -299,7 +312,18 @@ class EarService : Service() {
 
     private fun startEarbudParts() {
         if (useBuds) {
-            try { buds = BudsClient(this, { Earbuds.filter(this) }) { isOwner(filter) }.also { it.start() } } catch (e: Exception) { EhLog.w("buds init failed: ${e.message}") }
+            try {
+                buds = BudsClient(this, { Earbuds.filter(this) }) { isOwner(filter) }.also { c ->
+                    val p = getSharedPreferences("earhop", MODE_PRIVATE)
+                    // Separate noise control and equalizer per device: what is chosen here is applied when the Buds connect here.
+                    c.onUserChoice = { kind, value -> if (p.getBoolean("ownBudsSettings", true)) p.edit().putString(if (kind == "noise") "budsNoise" else "budsEq", value).apply() }
+                    c.ownSettings = {
+                        if (!p.getBoolean("ownBudsSettings", true)) Pair(null, null)
+                        else Pair(p.getString("budsNoise", null), p.getString("budsEq", null))
+                    }
+                    c.start()
+                }
+            } catch (e: Exception) { EhLog.w("buds init failed: ${e.message}") }
         } else {
             try { ears = EarScanner(this, -75, false).also { it.start() } } catch (e: Exception) { EhLog.w("ear scan failed: ${e.message}") }
             try {

@@ -115,6 +115,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.state.diagMessage = "Collecting… received from \(self.diagParts.keys.sorted().map(DeviceName.pretty).joined(separator: ", "))"
         }
         state.onDiagnostics = { [weak self] in self?.collectDiagnostics() }
+        clip.onControl = { [weak self] item in self?.control(item) }
+        budsWear.onUserChoice = { [weak self] kind, value in
+            guard let self, self.state.cfg.ownBudsSettings else { return }
+            if kind == "noise" { self.state.cfg.budsNoise = value } else { self.state.cfg.budsEq = value }
+        }
+        budsWear.ownSettings = { [weak self] in
+            guard let c = self?.state.cfg, c.ownBudsSettings else { return (nil, nil) }
+            return (c.budsNoise.isEmpty ? nil : c.budsNoise, c.budsEq.isEmpty ? nil : c.budsEq)
+        }
+        state.onSendFiles = { [weak self] urls, dev in self?.clip.sendFiles(urls, to: dev.map { [$0] }) }
+        state.onSendLink = { [weak self] url, dev in self?.clip.sendLink(url, to: dev) }
+        state.clipPinned = PinStore.load(secret: cfg.secret)
+        state.onPinsChanged = { [weak self] in
+            guard let self else { return }
+            PinStore.save(self.state.clipPinned, secret: self.state.cfg.secret)
+        }
         clip.start()
         ble.onStatus = { [weak self] s in self?.controller.receive(s, via: "ble") }
         if ProcessInfo.processInfo.environment["EARHOP_NO_BT"] == nil {
@@ -174,6 +190,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         state.onTake = { [weak self] in self?.controller.claimNow() }
         state.onRelease = { [weak self] in self?.controller.releaseNow() }
+        state.onSleep = { [weak self] m in self?.setSleep(minutes: m) }
         state.onOpenSettings = { [weak self] in self?.showSettings() }
         state.onRestart = { [weak self] in self?.restart() }
 
@@ -281,6 +298,184 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             speaker.routed(act, ok: ok)
         }
         if state.onSpeaker != speaker.onSpeaker { state.onSpeaker = speaker.onSpeaker }
+    }
+
+    // MARK: battery, volume and other messages between devices
+
+    /// Battery levels reported by another device (left, right, case and charging), and when.
+    private var remoteBattery: (l: Int, r: Int, c: Int, cl: Bool, cr: Bool, cc: Bool, at: Date)?
+    private var batteryAlerts = BatteryAlerts()
+    private var lastBatteryKey = ""
+    private var lastBatterySentAt = Date.distantPast
+    private var batteryCheckedAt = Date.distantPast
+    /// The volume another device last used while it had the earbuds, for the volume handover.
+    private var remoteVolume: (dev: String, v: Float, at: Date)?
+    private var lastVolumeSent: Float = -1
+    private var lastVolumeSentAt = Date.distantPast
+    private var wasOwner = false
+
+    func control(_ item: ClipItem) {
+        let text = String(data: item.data, encoding: .utf8) ?? ""
+        switch item.kind {
+        case "batt":
+            let p = text.split(separator: ",").map(String.init)
+            guard p.count >= 6 else { return }
+            remoteBattery = (Int(p[0]) ?? -1, Int(p[1]) ?? -1, Int(p[2]) ?? -1, p[3] == "1", p[4] == "1", p[5] == "1", Date())
+            updateIcon()
+        case "vol":
+            if let v = Float(text) { remoteVolume = (item.dev, v, Date()) }
+        case "settings":
+            applySharedSettings(text, from: item.dev)
+        default: break
+        }
+    }
+
+    /// The best battery levels known: this Mac's own (earbuds connected here), else another device's from the last 10 min.
+    func batteryLevels() -> (l: Int, r: Int, c: Int, cl: Bool, cr: Bool, cc: Bool, local: Bool)? {
+        if state.cfg.isBuds, state.budsConnected {
+            let b = state.buds
+            if b.battL >= 0 || b.battR >= 0 { return (b.battL, b.battR, b.battCase, b.chargeL, b.chargeR, b.chargeCase, true) }
+        } else if !state.cfg.isBuds, let b = state.battery {
+            return (b.0, b.1, state.caseBattery ?? -1, false, false, false, true)
+        }
+        if let r = remoteBattery, Date().timeIntervalSince(r.at) < 600 { return (r.l, r.r, r.c, r.cl, r.cr, r.cc, false) }
+        return nil
+    }
+
+    /// Every 2 s: share this Mac's battery levels when they are its own, and alert at 20 % and 10 %.
+    func batteryTick() {
+        guard Date().timeIntervalSince(batteryCheckedAt) >= 2 else { return }
+        batteryCheckedAt = Date()
+        guard let b = batteryLevels() else { return }
+        if b.local {
+            let key = "\(b.l),\(b.r),\(b.c),\(b.cl ? 1 : 0),\(b.cr ? 1 : 0),\(b.cc ? 1 : 0)"
+            if key != lastBatteryKey || Date().timeIntervalSince(lastBatterySentAt) > 60 {
+                lastBatteryKey = key; lastBatterySentAt = Date()
+                clip.sendControl(kind: "batt", data: Data(key.utf8), to: nil)
+            }
+        }
+        guard state.cfg.lowBatteryAlerts else { return }
+        let earbuds = state.cfg.isBuds ? "Galaxy Buds" : "AirPods"
+        for (part, level, charging, words) in [("left", b.l, b.cl, "Left earbud"), ("right", b.r, b.cr, "Right earbud"), ("case", b.c, b.cc, "\(earbuds) case")] {
+            if let t = batteryAlerts.update(part, level: level, charging: charging) {
+                Notifier.post("\(words) battery low", "\(level) % left\(t == 10 ? ", charge soon" : "")")
+                Log.write("battery: \(part) at \(level) % (alert at \(t) %)")
+            }
+        }
+    }
+
+    /// While this Mac has the earbuds it tells the others its volume; when they arrive here it takes the last one.
+    func volumeTick(owner: Bool) {
+        defer { wasOwner = owner }
+        if owner, !wasOwner, state.cfg.volumeHandover, let r = remoteVolume, r.dev != state.cfg.deviceName,
+           Date().timeIntervalSince(r.at) < 600 {
+            // A moment later, once the sound runs through the earbuds.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                OutputRoute.volume = r.v
+                Log.write("volume: set to \(Int(r.v * 100)) %, as on \(r.dev)")
+            }
+        }
+        guard owner, let v = OutputRoute.volume else { return }
+        if abs(v - lastVolumeSent) > 0.02 || Date().timeIntervalSince(lastVolumeSentAt) > 60 {
+            lastVolumeSent = v; lastVolumeSentAt = Date()
+            clip.sendControl(kind: "vol", data: Data(String(format: "%.3f", v).utf8), to: nil)
+        }
+    }
+
+    // MARK: sleep timer and automation
+
+    func setSleep(minutes: Int) {
+        if minutes <= 0 { state.sleepUntil = .distantPast; Log.write("sleep: timer cancelled"); return }
+        state.sleepUntil = Date().addingTimeInterval(Double(minutes) * 60)
+        if (5 ... 240).contains(minutes) { state.cfg.sleepMinutes = minutes }
+        Log.write("sleep: pause and release in \(minutes) min")
+    }
+
+    func sleepTick(owner: Bool) {
+        guard state.sleepUntil > .distantPast, Date() >= state.sleepUntil else { return }
+        state.sleepUntil = .distantPast
+        Log.write("sleep: timer ended, pausing and releasing the earbuds")
+        MediaControl.pausePlayback()
+        if owner { DispatchQueue.main.asyncAfter(deadline: .now() + 1) { self.controller.releaseNow() } }
+        Notifier.post("Sleep timer", "Paused and released the earbuds")
+    }
+
+    /// earhop:// links, for Shortcuts ("Open URL"), scripts and other apps: take, release, send-clipboard,
+    /// sleep?minutes=30, sleep-cancel, diagnostics.
+    func application(_ app: NSApplication, open urls: [URL]) {
+        for u in urls where u.scheme == "earhop" { run(command: u.host ?? "", minutes: URLComponents(url: u, resolvingAgainstBaseURL: false)?
+            .queryItems?.first { $0.name == "minutes" }?.value.flatMap(Int.init)) }
+    }
+
+    /// One automation command (earhop:// links and AppleScript).
+    @discardableResult
+    func run(command: String, minutes: Int? = nil) -> Bool {
+        Log.write("automation: \(command)")
+        switch command {
+        case "take": controller.claimNow()
+        case "release": controller.releaseNow()
+        case "send-clipboard": clip.sendNow()
+        case "sleep": setSleep(minutes: minutes ?? state.cfg.sleepMinutes)
+        case "sleep-cancel": setSleep(minutes: 0)
+        case "diagnostics": collectDiagnostics()
+        default: return false
+        }
+        return true
+    }
+
+    // MARK: shared settings
+
+    private var lastShared: [String: String] = [:]
+    private var settingsCheckedAt = Date.distantPast
+    private var settingsSentAt = Date.distantPast
+    private var settingsPeers = Set<String>()
+
+    /// Once a second: a shared setting changed here is stamped and sent; every 5 minutes, and when a new device appears,
+    /// the whole set goes out so devices that were away catch up.
+    func settingsTick() {
+        let now = Proto.nowMs()
+        let vals = SettingsSync.values(state.cfg).mapValues { "\($0)" }
+        if lastShared.isEmpty { lastShared = vals; return }
+        var changed = false
+        for (k, v) in vals where lastShared[k] != v {
+            state.cfg.settingsStamps[k] = now
+            changed = true
+        }
+        lastShared = vals
+        let peersNow = Set(state.peers.map(\.name))
+        let newPeer = !peersNow.subtracting(settingsPeers).isEmpty
+        settingsPeers = peersNow
+        if changed || newPeer || Date().timeIntervalSince(settingsSentAt) > 300 {
+            settingsSentAt = Date()
+            clip.sendControl(kind: "settings", data: SettingsSync.encode(state.cfg, stamps: state.cfg.settingsStamps), to: nil)
+        }
+    }
+
+    func applySharedSettings(_ text: String, from dev: String) {
+        let remote = SettingsSync.decode(Data(text.utf8))
+        let apply = SettingsSync.merge(local: state.cfg.settingsStamps, remote: remote, offsetMs: ClockGuard.shared.offset(dev) ?? 0)
+        guard !apply.isEmpty else { return }
+        var c = state.cfg
+        for (k, r) in apply { SettingsSync.apply(k, r.value, to: &c); c.settingsStamps[k] = r.stamp }
+        state.cfg = c
+        lastShared = SettingsSync.values(c).mapValues { "\($0)" }
+        Log.write("settings: \(apply.keys.sorted().joined(separator: ", ")) changed on \(dev), applied here")
+    }
+
+    // MARK: follow my attention
+
+    private var unlockedAt = Date.distantPast
+    private var attentionObserver: NSObjectProtocol?
+
+    /// The user unlocked this Mac or pressed a key in the last 30 s. Keys are only counted, never read.
+    func attentionNow() -> Bool {
+        if attentionObserver == nil {
+            attentionObserver = DistributedNotificationCenter.default().addObserver(forName: .init("com.apple.screenIsUnlocked"), object: nil, queue: .main) { [weak self] _ in
+                self?.unlockedAt = Date()
+            }
+        }
+        let sinceKey = CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .keyDown)
+        return Date().timeIntervalSince(unlockedAt) < 30 || sinceKey < 30
     }
 
     // MARK: status page and diagnostics
@@ -402,7 +597,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Galaxy Buds report wear status over Samsung's serial channel. Until that is open they count as in the ears.
         let reading: EarReading = state.cfg.isBuds ? budsWear.reading : (ears?.reading ?? .unknown)
         let ear = reading.ear
-        let inCall = state.cfg.detectCalls && callDetector.update(now: Date(), mic: AudioMonitor.isMicInUse(), output: deviceRunning)
+        // A meeting app (Zoom, WhatsApp, Teams, Settings, Handoff) producing sound counts as a call at once, so meetings
+        // come before music; any other app needs microphone and speaker busy together for 2 s.
+        let meeting = (apps ?? []).contains { state.cfg.meetingApps.contains($0) }
+        let detected = callDetector.update(now: Date(), mic: AudioMonitor.isMicInUse(), output: deviceRunning)
+        let inCall = state.cfg.detectCalls && (detected || meeting)
 
         // Ownership: instant IOBluetooth check, with an async blueutil probe only as a fallback.
         if let fast = controller.blue.fastConnected() {
@@ -424,7 +623,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ears?.setGentle(state.cfg.gentleScan && owner && playing)
         // Speaker fallback first, so when a bud goes back in the sound is on the earbuds before the resume key is sent.
         speakerTick(playing: playing, reading: reading, owner: owner, inCall: inCall)
+        batteryTick()
+        volumeTick(owner: owner)
+        sleepTick(owner: owner)
+        if Date().timeIntervalSince(settingsCheckedAt) >= 1 { settingsCheckedAt = Date(); settingsTick() }
         controller.onSpeaker = speaker.onSpeaker
+        controller.attention = attentionNow()
         controller.tick(playing: playing, ear: reading, owner: owner, inCall: inCall)
         if state.phase != controller.phase { state.phase = controller.phase }
         if state.holdReason != controller.holdReason { state.holdReason = controller.holdReason }
@@ -435,13 +639,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if Date().timeIntervalSince(earbudsCheckedAt) >= 2 { earbudsCheckedAt = Date(); detectEarbuds() }
         // Send immediately when something changed, otherwise once a second as a heartbeat.
         let shown = controller.core.advertisedPlaying(playing)
-        let key = "\(shown)|\(ear.rawValue)|\(owner)|\(inCall)|\(state.cfg.earbuds)"
+        let key = "\(shown)|\(ear.rawValue)|\(owner)|\(inCall)|\(state.cfg.earbuds)|\(attentionNow())"
         if key != lastSentKey || Date().timeIntervalSince(lastSendAt) >= 1 {
             lastSentKey = key
             lastSendAt = Date()
             seq += 1
             let status = Status(dev: state.cfg.deviceName, ts: Proto.nowMs(), seq: seq, playing: shown, ear: ear, owner: owner,
-                                call: inCall, prof: state.cfg.isBuds ? "buds" : "airpods")
+                                call: inCall, prof: state.cfg.isBuds ? "buds" : "airpods", att: attentionNow())
             sendStatus(status)
         }
         let keys = AudioMonitor.canPostKeys
@@ -467,12 +671,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         img?.isTemplate = true
         item.button?.image = img
         var title = state.safeMode ? " !" : (state.owner ? " \u{25CF}" : "")
-        if state.cfg.menuBarBattery {
-            if state.cfg.isBuds {
-                let b = state.buds
-                let m = [b.battL, b.battR].filter { $0 >= 0 }.min()
-                if state.budsConnected, let m { title += " \(m)%" }
-            } else if let b = state.battery { title += " \(min(b.0, b.1))%" }
+        if state.cfg.menuBarBattery, let b = batteryLevels(), let m = [b.l, b.r].filter({ $0 >= 0 }).min() {
+            // The lower bud, from this Mac or from the device that has the earbuds.
+            title += " \(m)%"
         }
         item.button?.title = title
         item.button?.imagePosition = title.isEmpty ? .imageOnly : .imageLeading
@@ -602,6 +803,65 @@ if CommandLine.arguments.contains("--selftest") {
     check("all delivered", rr.words("c1", now: rc0.addingTimeInterval(62)) == "Delivered to Phone ✓, Tablet ✓" && rr.due(now: rc0.addingTimeInterval(70)).isEmpty)
     let f = ClipCodec.encode(ClipItem(id: "x", dev: "mac", kind: "ack", mime: "m", ts: 1, data: Data("c1".utf8), to: "phone"), secret: "k")!
     check("recipient field round trip", ClipCodec.decode(f, secret: "k")?.to == "phone")
+    // Follow my attention.
+    func attClaims(_ follow: Bool, here: Bool, ownerAtt: Bool) -> Bool {
+        var st = HandoffSettings(deviceName: "phone"); st.followAttention = follow
+        var core = HandoffCore(settings: st)
+        let t0 = Date(timeIntervalSince1970: 1_000_000)
+        var t = t0
+        let both = EarReading(ear: .both, source: "buds-rfcomm", confidence: .high)
+        while t.timeIntervalSince(t0) < 4 {
+            let p = HandoffPeer(name: "mac", playing: true, ear: .both, owner: true, call: false, seenAt: t,
+                                playingSince: t0.addingTimeInterval(0.5), lastPlayingAt: t, att: ownerAtt)
+            let acts = core.tick(HandoffInput(now: t, playing: true, ear: both, owner: false, inCall: false, peers: [p], gate: nil, attention: here))
+            if acts.contains(where: { if case .claim = $0 { return true }; return false }) { return true }
+            t = t.addingTimeInterval(0.25)
+        }
+        return false
+    }
+    func attYields(_ follow: Bool, here: Bool, theirAtt: Bool) -> Bool {
+        var st = HandoffSettings(deviceName: "phone"); st.followAttention = follow
+        var core = HandoffCore(settings: st)
+        let t0 = Date(timeIntervalSince1970: 1_000_000)
+        var t = t0
+        let both = EarReading(ear: .both, source: "buds-rfcomm", confidence: .high)
+        while t.timeIntervalSince(t0) < 4 {
+            let p = HandoffPeer(name: "tab", playing: true, ear: .both, owner: false, call: false, seenAt: t,
+                                playingSince: t0.addingTimeInterval(-5), lastPlayingAt: t, att: theirAtt)
+            let acts = core.tick(HandoffInput(now: t, playing: true, ear: both, owner: true, inCall: false, peers: [p], gate: nil, attention: here))
+            if acts.contains(where: { if case .release = $0 { return true }; return false }) { return true }
+            t = t.addingTimeInterval(0.25)
+        }
+        return false
+    }
+    check("attention: user here wins over a busy owner", attClaims(true, here: true, ownerAtt: false) && !attClaims(true, here: false, ownerAtt: false)
+          && !attClaims(false, here: true, ownerAtt: false) && !attClaims(true, here: true, ownerAtt: true))
+    check("attention: owner yields when the user moved away", attYields(true, here: false, theirAtt: true) && !attYields(true, here: true, theirAtt: true)
+          && !attYields(false, here: false, theirAtt: true) && !attYields(true, here: false, theirAtt: false))
+    var ba = BatteryAlerts()
+    check("battery alert at 20 then 10, once each", ba.update("left", level: 30, charging: false) == nil && ba.update("left", level: 20, charging: false) == 20
+          && ba.update("left", level: 19, charging: false) == nil && ba.update("left", level: 10, charging: false) == 10
+          && ba.update("left", level: 9, charging: false) == nil)
+    check("battery alert again after charging", ba.update("left", level: 12, charging: true) == nil && ba.update("left", level: 18, charging: false) == 20)
+    var bAlerts2 = BatteryAlerts()
+    check("battery straight to 10", bAlerts2.update("case", level: 8, charging: false) == 10 && bAlerts2.update("case", level: 7, charging: false) == nil
+          && bAlerts2.update("case", level: -1, charging: false) == nil)
+    let rem: [String: (value: Any, stamp: Int64)] = ["clipSync": (false, 5000), "autoSwitch": (true, 1000), "secret": ("x", 9000)]
+    let mg = SettingsSync.merge(local: ["clipSync": 2000, "autoSwitch": 3000], remote: rem, offsetMs: 1000)
+    check("settings: newer change wins, older and local-only keys ignored", mg.keys.sorted() == ["clipSync"] && mg["clipSync"]?.stamp == 4000)
+    var sc = Config(secret: "k")
+    SettingsSync.apply("clipTransport", "wifi", to: &sc); SettingsSync.apply("clipTransport", "bad", to: &sc)
+    check("settings: values checked", sc.clipTransport == "wifi")
+    check("settings round trip", SettingsSync.decode(SettingsSync.encode(sc, stamps: ["clipTransport": 7])).keys.sorted() == ["clipTransport"])
+    let recHex = "000102030405060708090a0b1e589965a78e7f55c48da2ac5359585d3fe780ec850d3fcbd019"
+    let rec = Data((0 ..< recHex.count / 2).map { i -> UInt8 in
+        let h = recHex
+        let idx = h.index(h.startIndex, offsetBy: i * 2)
+        return UInt8(h[idx ..< h.index(idx, offsetBy: 2)], radix: 16)!
+    })
+    check("file record vector", FileStream.open(rec, secret: "test-secret", id: "f1", index: 0) == Data("hello file".utf8)
+          && FileStream.open(rec, secret: "test-secret", id: "f1", index: 1) == nil && FileStream.open(rec, secret: "test-secret", id: "f2", index: 0) == nil)
+    check("safe file names", FileStream.safeName("../../etc/passwd") == "passwd" && FileStream.safeName("...") == "file")
     check("device names", DeviceNames.valid("phone2") && DeviceNames.valid("work-mac") && !DeviceNames.valid("Phone")
           && !DeviceNames.valid("a b") && !DeviceNames.valid("-x") && !DeviceNames.valid(String(repeating: "a", count: 21)))
     check("tamper rejected", Proto.decode(String(data: wire, encoding: .utf8)!.replacingOccurrences(of: "\"playing\":0", with: "\"playing\":1").data(using: .utf8)!, secret: "k", nowMs: now) == nil)

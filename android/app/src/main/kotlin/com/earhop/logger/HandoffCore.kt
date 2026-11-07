@@ -26,6 +26,8 @@ sealed class HandoffAction {
 
 data class HandoffSettings(
     var deviceName: String = "phone",
+    /** Follow my attention: audio started on the device the user is using wins over a busy owner they are not using. */
+    var followAttention: Boolean = false,
     var priority: List<String> = listOf("mac", "tab", "phone"),
     var live: Boolean = true,
     var cooldownMs: Long = 2000,
@@ -48,6 +50,8 @@ class HandoffInput(
     val peers: Collection<PeerState>, val gate: String?,
     /** Speaker fallback has the sound on this device's own speaker while the earbuds are out. */
     val onSpeaker: Boolean = false,
+    /** The user was active on this device (unlocked it) in the last 30 s. */
+    val attention: Boolean = false,
 )
 
 /**
@@ -216,7 +220,8 @@ class HandoffCore(var settings: HandoffSettings) {
 
             // The owner blocks a claim only while it still plays and started after us, or played a moment ago.
             val ownerBusy = fresh.firstOrNull {
-                it.owner && if (it.playing) !(it.playingSince != 0L && playingSince != 0L && playingSince > it.playingSince + 1000)
+                // Follow my attention: the user is here and not on the owner, so the owner's audio does not hold the earbuds.
+                it.owner && !(settings.followAttention && i.attention && !it.att) && if (it.playing) !(it.playingSince != 0L && playingSince != 0L && playingSince > it.playingSince + 1000)
                 else now - it.lastPlayingAt < settings.quietMs
             }
             // Priority only breaks a near tie (both started within 2.5 s). Otherwise the newest playback wins.
@@ -254,8 +259,10 @@ class HandoffCore(var settings: HandoffSettings) {
             } else if (i.owner && cooled && pending == null && i.playing && playingSince != 0L) {
                 // Another device started after this one: pause first, then let go, so the two never stream together.
                 val taker = fresh.firstOrNull {
-                    !it.owner && it.playing && it.ear != "none" && it.playingSince != 0L &&
-                        now - it.playingSince >= relNeed && it.playingSince > playingSince + 1000 && it.playingSince > ownerSince
+                    !it.owner && it.playing && it.ear != "none" && it.playingSince != 0L && now - it.playingSince >= relNeed &&
+                        ((it.playingSince > playingSince + 1000 && it.playingSince > ownerSince) ||
+                            // Follow my attention: the user moved to that device and is not on this one.
+                            (settings.followAttention && it.att && !i.attention))
                 }
                 if (taker != null) {
                     out += pauseBeforeRelease("${taker.name} started playing", now)

@@ -52,10 +52,14 @@ struct HandoffPeer {
     var seenAt: Date
     var playingSince: Date?
     var lastPlayingAt: Date?
+    /// The user was active on that device (unlocked it or typed) in the last 30 s.
+    var att: Bool = false
 }
 
 struct HandoffSettings {
     var deviceName = "mac"
+    /// Follow my attention: audio started on the device the user is using wins over a busy owner they are not using.
+    var followAttention = false
     var priority = ["mac", "tab", "phone"]
     var live = true
     var cooldown: TimeInterval = 2
@@ -84,6 +88,8 @@ struct HandoffInput {
     var gate: String?
     /// Speaker fallback has the sound on this device's own speakers while the earbuds are out.
     var onSpeaker: Bool = false
+    /// The user was active on this device (unlocked it or typed) in the last 30 s.
+    var attention: Bool = false
 }
 
 /// Pause and resume on ear removal, the same rules as Android's EarPolicy. Only trusted readings count.
@@ -331,6 +337,8 @@ final class HandoffCore {
         // The current owner blocks a claim only while it still plays and started after us, or played a moment ago.
         let ownerBusy = fresh.first { p in
             guard p.owner else { return false }
+            // Follow my attention: the user is here and not on the owner, so the owner's audio does not hold the earbuds.
+            if settings.followAttention, i.attention, !p.att { return false }
             if p.playing {
                 guard let theirs = p.playingSince, let mine = playingSince else { return true }
                 return !(mine > theirs.addingTimeInterval(1))
@@ -375,8 +383,10 @@ final class HandoffCore {
         } else if i.owner, cooled, pending == nil, i.playing, let mine = playingSince,
                   let taker = fresh.first(where: { p in
                       !p.owner && p.playing && p.ear != .none
-                          && (p.playingSince.map { now.timeIntervalSince($0) >= relNeed && $0 > mine.addingTimeInterval(1)
-                              && $0 > (ownerSince ?? .distantPast) } ?? false)
+                          && (p.playingSince.map { now.timeIntervalSince($0) >= relNeed
+                              && (($0 > mine.addingTimeInterval(1) && $0 > (ownerSince ?? .distantPast))
+                                  // Follow my attention: the user moved to that device and is not on this one.
+                                  || (settings.followAttention && p.att && !i.attention)) } ?? false)
                   }) {
             // Another device started after this one: pause first, then let go, so the two never stream together.
             out += pauseBeforeRelease("\(taker.name) started playing", now)

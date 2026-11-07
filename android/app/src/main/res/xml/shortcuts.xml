@@ -22,4 +22,9 @@
             android:targetPackage="com.earhop.logger"
             android:targetClass="com.earhop.logger.ActionActivity" />
     </shortcut>
+    <!-- Direct share targets: the dynamic shortcuts "Send to Mac", "Send to Tablet" ... (ShareTargets.publish). -->
+    <share-target android:targetClass="com.earhop.logger.ShareActivity">
+        <data android:mimeType="*/*" />
+        <category android:name="com.earhop.logger.category.SEND" />
+    </share-target>
 </shortcuts>
