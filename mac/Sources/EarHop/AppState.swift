@@ -55,6 +55,11 @@ final class AppState: ObservableObject {
     /// Clipboard sync paused until then (not saved; a restart resumes it).
     @Published var clipPausedUntil = Date.distantPast
     /// How many devices each link can reach for clips right now.
+    /// The Status page: whether each link really works, refreshed once a second.
+    @Published var status = LinkStatus()
+    /// Copy diagnostics: the file being collected, or the result to show.
+    @Published var diagMessage = ""
+    var onDiagnostics: (() -> Void)?
     @Published var clipBlePeers = 0
     @Published var clipWifiPeers = 0
     var onClipRecopy: ((ClipRecent) -> Void)?

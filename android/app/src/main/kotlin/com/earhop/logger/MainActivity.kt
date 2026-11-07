@@ -113,6 +113,11 @@ class MainActivity : Activity() {
     private lateinit var clipSetup: LinearLayout
     private var clipSetupSig = "init"
     private lateinit var recentBox: LinearLayout
+    private lateinit var statusBox: LinearLayout
+    private lateinit var diagText: TextView
+    private var statusSig = ""
+    private var diagCollecting = false
+    private val diagParts = java.util.concurrent.ConcurrentHashMap<String, String>()
     private var recentSig = "init"
     private var rootCard: LinearLayout? = null
     private lateinit var rootBtn: Button
@@ -879,6 +884,16 @@ class MainActivity : Activity() {
             }
         }
 
+        val exclude = card("Exclude apps", "Copies noticed in these apps stay on this device. EarHop knows the app when the accessibility trigger saw the copy; with other methods the app is not known.")
+        val excludeBtn = button("", false) { }
+        fun showExcluded() {
+            val ex = ClipSync.excludedApps(this)
+            excludeBtn.text = "Excluded: ${if (ex.isEmpty()) "none" else ex.joinToString { appLabel(it) }}"
+        }
+        excludeBtn.setOnClickListener { tap(it); pickApps("Never send copies from these apps", "clipExcludeApps") { showExcluded() } }
+        showExcluded()
+        exclude.addView(excludeBtn, lp())
+
         val method = card("Connection for clips")
         segmented(method, clipMethods, { ClipSync.method(this) }) { v -> prefs.edit().putString("clipTransport", v).apply(); refresh() }
         clipMethodText = text("", 12.5f, subC).apply { setPadding(dp(2), dp(6), 0, 0) }
@@ -893,6 +908,13 @@ class MainActivity : Activity() {
         val peers = card("Other devices")
         peersBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         peers.addView(peersBox)
+
+        val statusCard = card("Status", "Whether each link really works right now, and when each device was last heard. Copy diagnostics asks every device for its status and the end of its log and shares one file. Logs never contain clipboard contents.")
+        statusBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        statusCard.addView(statusBox)
+        diagText = text("", 12.5f, subC).apply { setPadding(0, dp(8), 0, 0); visibility = View.GONE }
+        statusCard.addView(button("Copy diagnostics", false) { collectDiagnostics() }, lp(12))
+        statusCard.addView(diagText)
 
         val conn = card("Earbud switching link", "How this device tells your other devices where the earbuds are. Both is the most reliable.")
         segmented(conn, listOf("ble" to "Bluetooth", "both" to "Both", "wifi" to "Wi-Fi"), { prefs.getString("transport", "both") ?: "both" }) { v ->
@@ -1545,10 +1567,65 @@ class MainActivity : Activity() {
         }
     }
 
+    /** The Status card: rebuilt only when a row changes (ages are coarse, so the page still settles). */
+    private fun refreshStatusCard(run: Boolean) {
+        if (!statusBox.isShown && statusSig.isNotEmpty()) return
+        val rows = if (run) EhState.statusRows() else listOf(StatusRow("EarHop", false, "Stopped"))
+        val sig = rows.joinToString("|") { "${it.title}${it.ok}${it.detail}" }
+        if (sig == statusSig) return
+        statusSig = sig
+        statusBox.removeAllViews()
+        rows.forEachIndexed { i, r ->
+            if (i > 0) divider(statusBox)
+            val line = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(0, dp(6), 0, dp(6)) }
+            // State on the outline only: green when working, grey when not.
+            if (r.ok != null) line.addView(View(this).apply { background = g.dot(if (r.ok) g.on else g.off); contentDescription = if (r.ok) "working" else "not working" },
+                LinearLayout.LayoutParams(dp(10), dp(10)).apply { rightMargin = dp(12) })
+            val words = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+            words.addView(text(r.title, 15f, textC))
+            words.addView(text(r.detail, 12f, subC))
+            line.addView(words, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            statusBox.addView(line)
+        }
+    }
+
+    /** Copy diagnostics: asks every device, waits 15 s, writes one file and opens the share sheet. */
+    private fun collectDiagnostics() {
+        if (diagCollecting) return
+        if (!EhState.running) { Toast.makeText(this, "Start EarHop first", Toast.LENGTH_SHORT).show(); return }
+        diagCollecting = true
+        diagParts.clear()
+        diagText.visibility = View.VISIBLE
+        diagText.text = "Collecting from your devices…"
+        ClipSync.onDiagnostics = { dev, text -> diagParts[dev] = text; handler.post { diagText.text = "Collecting… received from ${diagParts.keys.sorted().joinToString { pretty(it) }}" } }
+        ClipSync.requestDiagnostics(applicationContext)
+        handler.postDelayed({
+            diagCollecting = false
+            ClipSync.onDiagnostics = null
+            val self = prefs.getString("name", "phone") ?: "phone"
+            val sb = StringBuilder("EarHop diagnostics, ${java.util.Date()}\n\n===== $self (this device) =====\n")
+            sb.append(ClipSync.diagnosticsPart(applicationContext)).append("\n")
+            for ((dev, part) in diagParts.toSortedMap()) sb.append("\n===== $dev =====\n").append(part).append("\n")
+            val missing = EhState.peers.keys.filter { !diagParts.containsKey(it) }.sorted()
+            if (missing.isNotEmpty()) sb.append("\nNo reply from: ${missing.joinToString(", ")}\n")
+            try {
+                val dir = java.io.File(cacheDir, "clip").apply { mkdirs() }
+                val stamp = java.text.SimpleDateFormat("yyyy-MM-dd-HHmmss", java.util.Locale.US).format(java.util.Date())
+                val f = java.io.File(dir, "earhop-diagnostics-$stamp.txt").apply { writeText(sb.toString()) }
+                val uri = Uri.parse("content://$packageName.clip/${f.name}")
+                val got = (listOf("this device") + diagParts.keys.sorted().map { pretty(it) }).joinToString(", ")
+                diagText.text = "Collected from $got" + if (missing.isEmpty()) "." else ". No reply from ${missing.joinToString { pretty(it) }}."
+                startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_STREAM, uri)
+                    .putExtra(Intent.EXTRA_SUBJECT, f.name).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION), "Share diagnostics"))
+                EhLog.w("diag: collected diagnostics from $got")
+            } catch (e: Exception) { diagText.text = "Could not write the file: ${e.message}" }
+        }, 15_000)
+    }
+
     private fun refreshRecent() {
         val list = ClipSync.recent.toList()
         val minute = System.currentTimeMillis() / 60000
-        val sig = "${ClipSync.keepRecent(this)}$minute" + list.joinToString { "${it.at}" }
+        val sig = "${ClipSync.keepRecent(this)}$minute" + list.joinToString { "${it.at}${it.receipt}" }
         if (sig == recentSig) return
         recentSig = sig
         recentBox.removeAllViews()
@@ -1571,6 +1648,7 @@ class MainActivity : Activity() {
             val ago = (System.currentTimeMillis() - r.at) / 60000
             val whenS = if (ago < 1) "just now" else if (ago < 60) "$ago min ago" else shortTime(r.at)
             words.addView(text("${if (r.sent) "Sent" else "From ${pretty(r.dev)}"}, $whenS", 12f, subC))
+            if (r.sent && r.receipt.isNotEmpty()) words.addView(text(r.receipt, 12f, subC))
             row.addView(words, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
             if (r.text != null) row.setOnClickListener {
                 tap(it, true); ClipSync.copyBack(applicationContext, r.text)
@@ -1733,7 +1811,7 @@ class MainActivity : Activity() {
 
     private fun appLabel(pkg: String) = try { packageManager.getApplicationLabel(packageManager.getApplicationInfo(pkg, 0)).toString() } catch (e: Exception) { pkg }
 
-    private fun pickApps(title: String, key: String) {
+    private fun pickApps(title: String, key: String, after: () -> Unit = { rebuildAppRules() }) {
         val pm = packageManager
         val launch = pm.queryIntentActivities(Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER), 0)
             .map { it.activityInfo.packageName to it.loadLabel(pm).toString() }.distinctBy { it.first }.sortedBy { it.second.lowercase() }
@@ -1741,7 +1819,7 @@ class MainActivity : Activity() {
         val checked = BooleanArray(launch.size) { launch[it].first in saved }
         val d = AlertDialog.Builder(this).setTitle(title)
             .setMultiChoiceItems(launch.map { it.second }.toTypedArray(), checked) { _, i, on -> if (on) saved.add(launch[i].first) else saved.remove(launch[i].first) }
-            .setPositiveButton("Save") { _, _ -> prefs.edit().putStringSet(key, saved).apply(); rebuildAppRules() }
+            .setPositiveButton("Save") { _, _ -> prefs.edit().putStringSet(key, saved).apply(); after() }
             .setNegativeButton("Cancel", null).create()
         blurBehind(d)
         d.show()
@@ -2262,6 +2340,7 @@ class MainActivity : Activity() {
         refreshHealth(run)
         refreshStrip(run)
         refreshPeers(run)
+        refreshStatusCard(run)
         refreshPerms(run)
         refreshKeep()
         quickTiles.forEach { it() }

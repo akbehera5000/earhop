@@ -172,11 +172,25 @@ class BleLink(private val ctx: Context, private val secret: String, private val 
         override fun onScanFailed(errorCode: Int) {
             EhLog.w("ble: scan failed code=$errorCode, trying again shortly")
             scanStartedAt = 0L
+            scanFailed = true
         }
     }
 
+    /** Whether the last advertisement start worked (status card). */
+    @Volatile var advertisingOk = false
+        private set
+    /** Whether the scan reported a failure since it was last started. */
+    @Volatile var scanFailed = false
+        private set
+    val lastScanStart: Long get() = scanStartedAt
+
     private val advCb = object : AdvertiseCallback() {
-        override fun onStartFailure(errorCode: Int) { EhLog.w("ble: advertise failed code=$errorCode") }
+        override fun onStartFailure(errorCode: Int) {
+            // Already started counts as working.
+            advertisingOk = errorCode == ADVERTISE_FAILED_ALREADY_STARTED
+            if (!advertisingOk) EhLog.w("ble: advertise failed code=$errorCode")
+        }
+        override fun onStartSuccess(settingsInEffect: android.bluetooth.le.AdvertiseSettings?) { advertisingOk = true }
     }
 
     @SuppressLint("MissingPermission")
@@ -225,7 +239,8 @@ class BleLink(private val ctx: Context, private val secret: String, private val 
             scanner?.stopScan(scanCb)
             scanner?.startScan(listOf(filter), ScanSettings.Builder().setScanMode(mode).build(), scanCb)
             scanStartedAt = System.currentTimeMillis()
-        } catch (e: Exception) { EhLog.w("ble: scan failed ${e.message}") }
+            scanFailed = false
+        } catch (e: Exception) { EhLog.w("ble: scan failed ${e.message}"); scanFailed = true }
     }
 
     @SuppressLint("MissingPermission")

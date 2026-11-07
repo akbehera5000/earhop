@@ -102,6 +102,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.state.clipRecent = Array(list.prefix(self.state.cfg.clipHistory))
             }
         }
+        clip.onReceipt = { [weak self] id, words in
+            DispatchQueue.main.async {
+                guard let self, let i = self.state.clipRecent.firstIndex(where: { $0.clipId == id }) else { return }
+                self.state.clipRecent[i].receipt = words
+            }
+        }
+        clip.diagnostics = { [weak self] in self?.diagnosticsPart() ?? "" }
+        clip.onDiagnostics = { [weak self] dev, text in
+            guard let self, self.diagCollecting else { return }
+            self.diagParts[dev] = text
+            self.state.diagMessage = "Collecting… received from \(self.diagParts.keys.sorted().map(DeviceName.pretty).joined(separator: ", "))"
+        }
+        state.onDiagnostics = { [weak self] in self?.collectDiagnostics() }
         clip.start()
         ble.onStatus = { [weak self] s in self?.controller.receive(s, via: "ble") }
         if ProcessInfo.processInfo.environment["EARHOP_NO_BT"] == nil {
@@ -270,6 +283,84 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if state.onSpeaker != speaker.onSpeaker { state.onSpeaker = speaker.onSpeaker }
     }
 
+    // MARK: status page and diagnostics
+
+    private var diagCollecting = false
+    private var diagParts: [String: String] = [:]
+    private var statusAt = Date.distantPast
+
+    /// The Status page's facts, refreshed once a second from the tick.
+    func refreshStatus() {
+        guard Date().timeIntervalSince(statusAt) >= 1 else { return }
+        statusAt = Date()
+        var st = LinkStatus()
+        st.bluetoothOn = ears?.poweredOn ?? false
+        st.advertising = ble.advertising
+        st.scanResultAt = ears.map { $0.lastResultAt > .distantPast ? $0.lastResultAt : nil } ?? nil
+        st.bleHeardAt = ble.lastPeerAt > .distantPast ? ble.lastPeerAt : nil
+        st.clipService = clip.ble.serviceUp
+        st.wifiHeardAt = link.lastHeard > .distantPast ? link.lastHeard : nil
+        st.clipPort = clip.tcp.listening
+        st.transport = state.transport
+        let hosts = clip.wifiPeers()
+        let refused = controller.clockRefused
+        st.devices = controller.lastHeard().map { p in
+            LinkStatus.Device(name: p.name, lastHeard: p.at, via: p.via, bleAt: ble.peerIds[p.name]?.at,
+                              wifiHosts: hosts.filter { $0.dev == p.name }.map(\.host),
+                              clockOffsetMs: ClockGuard.shared.offset(p.name), clockRefusedAt: refused[p.name])
+        }
+        if st != state.status { state.status = st }
+    }
+
+    /// This Mac's part of a diagnostics file: version, links, devices and the end of the log (no clipboard contents).
+    func diagnosticsPart() -> String {
+        refreshStatus()
+        let s = state.status
+        let v = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
+        var out = "EarHop \(v) on macOS \(ProcessInfo.processInfo.operatingSystemVersionString), name \(state.cfg.deviceName)\n"
+        out += "bluetooth \(s.bluetoothOn) advertising \(s.advertising) scan result \(s.scanResultAt.map { "\(Int(-$0.timeIntervalSinceNow)) s ago" } ?? "never")"
+        out += " clip service \(s.clipService) clip port \(s.clipPort) link \(s.transport)\n"
+        out += "transport \(state.cfg.transport) clip method \(state.cfg.clipTransport) clip sync \(state.cfg.clipSync)\n"
+        for d in s.devices {
+            out += "device \(d.name): heard \(d.lastHeard.map { "\(Int(-$0.timeIntervalSinceNow)) s ago" } ?? "never") over \(d.via)"
+            out += ", ble \(d.bleAt.map { "\(Int(-$0.timeIntervalSinceNow)) s ago" } ?? "never"), wifi \(d.wifiHosts.count) address(es)"
+            out += ", clock offset \(d.clockOffsetMs.map { "\($0) ms" } ?? "unknown")\n"
+        }
+        // The end of the log, at most 50 KB, so the reply also fits over Bluetooth LE.
+        let log = Log.tail(1500)
+        out += "--- log ---\n" + String(log.suffix(50_000))
+        return out
+    }
+
+    /// Copy diagnostics: asks every device, waits 15 s, saves one file in Downloads and shows it in Finder.
+    func collectDiagnostics() {
+        guard !diagCollecting else { return }
+        diagCollecting = true
+        diagParts = [:]
+        state.diagMessage = "Collecting from your devices…"
+        clip.requestDiagnostics()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 15) { [weak self] in
+            guard let self else { return }
+            self.diagCollecting = false
+            let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
+            var text = "EarHop diagnostics, \(Date())\n\n===== \(self.state.cfg.deviceName) (this Mac) =====\n" + self.diagnosticsPart() + "\n"
+            for (dev, part) in self.diagParts.sorted(by: { $0.key < $1.key }) { text += "\n===== \(dev) =====\n" + part + "\n" }
+            let missing = self.state.status.devices.map(\.name).filter { self.diagParts[$0] == nil }
+            if !missing.isEmpty { text += "\nNo reply from: \(missing.joined(separator: ", "))\n" }
+            let dir = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first ?? Config.dir
+            let url = dir.appendingPathComponent("EarHop diagnostics \(stamp).txt")
+            do {
+                try text.write(to: url, atomically: true, encoding: .utf8)
+                NSWorkspace.shared.activateFileViewerSelecting([url])
+                let got = (["this Mac"] + self.diagParts.keys.sorted().map(DeviceName.pretty)).joined(separator: ", ")
+                self.state.diagMessage = "Saved \(url.lastPathComponent) in Downloads (\(got))" + (missing.isEmpty ? "." : ". No reply from \(missing.map(DeviceName.pretty).joined(separator: ", ")).")
+                Log.write("diag: saved diagnostics from \(got)")
+            } catch {
+                self.state.diagMessage = "Could not save the file: \(error.localizedDescription)"
+            }
+        }
+    }
+
     /// Never leave the sound on the speakers with the earbuds connected when EarHop quits.
     func applicationWillTerminate(_ n: Notification) {
         if speaker.onSpeaker { _ = OutputRoute.toEarbuds(state.cfg.activeAddress) }
@@ -292,6 +383,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func tick() {
+        refreshStatus()
         if Date().timeIntervalSince(clipPolledAt) >= 0.5 {
             clipPolledAt = Date(); clip.poll()
             let b = clip.blePeers().count, w = clip.wifiPeers().count
@@ -497,6 +589,19 @@ if CommandLine.arguments.contains("--selftest") {
     check("password-like text", PasswordLike.looks("Hunter2!xyz") && PasswordLike.looks("aB3dEf9hJ") && !PasswordLike.looks("hello world 123")
           && !PasswordLike.looks("short1A") && !PasswordLike.looks("https://example.com/A1b2") && !PasswordLike.looks("Some.One42@example.com")
           && !PasswordLike.looks("onlylowercaseletters"))
+    let rc0 = Date(timeIntervalSince1970: 0)
+    let rr = Receipts()
+    rr.track("c1", targets: ["phone", "tab"], now: rc0)
+    check("receipt counted once", rr.ack("c1", from: "phone") && !rr.ack("c1", from: "phone") && !rr.ack("c1", from: "mac"))
+    check("no retry before 5 s", rr.due(now: rc0.addingTimeInterval(4)).isEmpty)
+    check("retry the silent device at 5 s", rr.due(now: rc0.addingTimeInterval(5)).map(\.devs) == [["tab"]])
+    check("second retry at 15 s, then none", rr.due(now: rc0.addingTimeInterval(15)).count == 1 && rr.due(now: rc0.addingTimeInterval(40)).isEmpty)
+    check("receipt words", rr.words("c1", now: rc0.addingTimeInterval(10)) == "Delivered to Phone ✓; sending to Tablet"
+          && rr.words("c1", now: rc0.addingTimeInterval(61)) == "Delivered to Phone ✓; not delivered to Tablet")
+    _ = rr.ack("c1", from: "tab")
+    check("all delivered", rr.words("c1", now: rc0.addingTimeInterval(62)) == "Delivered to Phone ✓, Tablet ✓" && rr.due(now: rc0.addingTimeInterval(70)).isEmpty)
+    let f = ClipCodec.encode(ClipItem(id: "x", dev: "mac", kind: "ack", mime: "m", ts: 1, data: Data("c1".utf8), to: "phone"), secret: "k")!
+    check("recipient field round trip", ClipCodec.decode(f, secret: "k")?.to == "phone")
     check("device names", DeviceNames.valid("phone2") && DeviceNames.valid("work-mac") && !DeviceNames.valid("Phone")
           && !DeviceNames.valid("a b") && !DeviceNames.valid("-x") && !DeviceNames.valid(String(repeating: "a", count: 21)))
     check("tamper rejected", Proto.decode(String(data: wire, encoding: .utf8)!.replacingOccurrences(of: "\"playing\":0", with: "\"playing\":1").data(using: .utf8)!, secret: "k", nowMs: now) == nil)

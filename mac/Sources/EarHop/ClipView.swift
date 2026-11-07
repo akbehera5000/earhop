@@ -66,7 +66,12 @@ struct ClipRecentRow: View {
                 if r.kind == "image", let d = r.image, let img = NSImage(data: d) {
                     Image(nsImage: img).resizable().scaledToFill().frame(width: 22, height: 22).clipShape(RoundedRectangle(cornerRadius: 4))
                 }
-                Text(preview).font(.caption).lineLimit(1).truncationMode(.tail)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(preview).font(.caption).lineLimit(1).truncationMode(.tail)
+                    if r.sent, !r.receipt.isEmpty {
+                        Text(r.receipt).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                    }
+                }
                 Spacer(minLength: 4)
                 Text(r.sent ? "to \(r.dev)" : "from \(r.dev)").font(.caption2).foregroundStyle(.secondary).lineLimit(1)
                 Text(r.date, style: .time).font(.caption2).foregroundStyle(.secondary)
@@ -75,7 +80,7 @@ struct ClipRecentRow: View {
         }
         .buttonStyle(.plain)
         .help("Copy this again")
-        .accessibilityLabel("\(r.sent ? "Sent" : "Received") \(preview), \(r.sent ? "to" : "from") \(r.dev). Copy again.")
+        .accessibilityLabel("\(r.sent ? "Sent" : "Received") \(preview), \(r.sent ? "to" : "from") \(r.dev). \(r.receipt) Copy again.")
     }
     private var preview: String {
         if r.kind == "image" { return "Image" }
@@ -164,6 +169,20 @@ struct ClipCard: View {
 
 /// Settings, Clipboard.
 struct ClipboardPage: View {
+    static func appName(_ bundleId: String) -> String {
+        if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleId) {
+            return FileManager.default.displayName(atPath: url.path).replacingOccurrences(of: ".app", with: "")
+        }
+        return bundleId
+    }
+
+    static func runningApps() -> [(id: String, name: String)] {
+        NSWorkspace.shared.runningApplications
+            .filter { $0.activationPolicy == .regular && $0.bundleIdentifier != Bundle.main.bundleIdentifier }
+            .compactMap { a in a.bundleIdentifier.map { ($0, a.localizedName ?? $0) } }
+            .sorted { $0.1.lowercased() < $1.1.lowercased() }
+    }
+
     @ObservedObject var state: AppState
     private var mode: ClipMode { ClipMode(rawValue: state.cfg.clipTransport) ?? .both }
     private var others: [String] {
@@ -201,6 +220,23 @@ struct ClipboardPage: View {
                 Toggle("Skip password-like text", isOn: $state.cfg.clipSkipPasswords)
             } header: { Text("Behaviour") } footer: {
                 Text("With automatic sending off, use Send now in the menu bar popover. Skip password-like text keeps copies that look like a password (one word, 8 to 64 characters, mixed kinds, never links or email addresses) on this Mac; off, they sync like any text. Items a password manager marks as concealed are never sent.")
+            }
+            .disabled(!state.cfg.clipSync)
+            Section {
+                ForEach(state.cfg.clipExcludeApps, id: \.self) { id in
+                    HStack {
+                        Text(Self.appName(id))
+                        Spacer()
+                        Button("Remove") { state.cfg.clipExcludeApps.removeAll { $0 == id } }
+                    }
+                }
+                Menu("Add an app") {
+                    ForEach(Self.runningApps().filter { !state.cfg.clipExcludeApps.contains($0.id) }, id: \.id) { app in
+                        Button(app.name) { state.cfg.clipExcludeApps.append(app.id) }
+                    }
+                }
+            } header: { Text("Exclude apps") } footer: {
+                Text("Copies made while one of these apps is in front stay on this Mac. The list offers the apps running now.")
             }
             .disabled(!state.cfg.clipSync)
             Section {

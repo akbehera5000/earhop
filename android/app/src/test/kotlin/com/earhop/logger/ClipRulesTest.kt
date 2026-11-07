@@ -69,4 +69,28 @@ class ClipRulesTest {
         assertFalse(PasswordLike.looks("onlylowercaseletters"))
         assertFalse(PasswordLike.looks("A".repeat(30) + "1" + "b".repeat(40)))
     }
+
+    // ---- delivery receipts ----
+    private fun pretty(n: String) = when (n) { "mac" -> "Mac"; "tab" -> "Tablet"; "phone" -> "Phone"; else -> n }
+
+    @Test fun receiptsRetryTheSilentDeviceAndGiveUp() {
+        val r = Receipts()
+        r.track("c1", setOf("mac", "tab"), 0)
+        assertTrue(r.ack("c1", "mac")); assertFalse(r.ack("c1", "mac")); assertFalse(r.ack("c1", "phone"))
+        assertTrue(r.due(4_000).isEmpty())
+        assertEquals(listOf(Pair("c1", listOf("tab"))), r.due(5_000))
+        assertEquals(1, r.due(15_000).size)
+        assertTrue(r.due(40_000).isEmpty())
+        assertEquals("Delivered to Mac ✓; sending to Tablet", r.words("c1", 10_000, ::pretty))
+        assertEquals("Delivered to Mac ✓; not delivered to Tablet", r.words("c1", 61_000, ::pretty))
+        assertTrue(r.ack("c1", "tab"))
+        assertEquals("Delivered to Mac ✓, Tablet ✓", r.words("c1", 62_000, ::pretty))
+    }
+
+    @Test fun recipientFieldRoundTrip() {
+        val f = ClipCodec.encode(ClipItem("x", "phone", "ack", "m", 1, "c1".toByteArray(), to = "mac"), "k")!!
+        assertEquals("mac", ClipCodec.decode(f, "k")!!.to)
+        val g = ClipCodec.encode(ClipItem("y", "phone", "text", "text/plain", 1, "hi".toByteArray()), "k")!!
+        assertEquals("", ClipCodec.decode(g, "k")!!.to)
+    }
 }

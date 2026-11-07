@@ -73,7 +73,9 @@ class ClipAccessibilityService : AccessibilityService() {
         try {
             startActivity(Intent(this, ClipActivity::class.java)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                .putExtra("auto", true))
+                .putExtra("auto", true)
+                // The app that showed the copy message (System UI's preview does not tell), for Exclude apps.
+                .putExtra("source", if (systemPreview) null else event.packageName?.toString()))
         } catch (e: Exception) {
             EhLog.w("clip: could not open the send screen: ${e.message}")
         }

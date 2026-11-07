@@ -114,6 +114,7 @@ class EarService : Service() {
         }
         try { ble = BleLink(this, secret, name) { s -> onPeer(s, "ble") } } catch (e: Exception) { EhLog.w("ble init failed: ${e.message}") }
         ble?.onUnknownId = { id, d -> ClipSync.lookupName(id, d) }
+        EhState.statusRows = { statusRows() }
         try { openA2dp() } catch (e: Exception) { EhLog.w("a2dp failed: ${e.message}") }
         startEarbudParts()
 
@@ -134,6 +135,7 @@ class EarService : Service() {
 
         // Clipboard sync (Bluetooth LE and Wi-Fi).
         EhState.wifiPeers = { skip -> link?.peerHostsExcept(skip) ?: emptyList() }
+        EhState.wifiHostsOf = { dev -> link?.hostsOf(dev) ?: emptyList() }
         try { ClipSync.start(this) } catch (e: Exception) { EhLog.w("clip: start failed ${e.message}") }
         ble?.onRecovered = { ClipSync.restartGatt() }
 
@@ -258,6 +260,36 @@ class EarService : Service() {
     }
 
     /** Starts the parts that belong to the active earbuds: the Galaxy Buds channel, or the AirPods scanner and channel. */
+    /** The Status card: whether each link really works, and when each device was last heard and how. */
+    private fun statusRows(): List<StatusRow> {
+        val now = System.currentTimeMillis()
+        // Coarse on purpose: the card changes only when this does, so the screen still settles.
+        fun ago(t: Long) = if (t <= 0L) "never" else ((now - t) / 1000).let { if (it < 15) "just now" else if (it < 60) "under a minute ago" else "${it / 60} min ago" }
+        val bt = (getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager).adapter?.isEnabled == true
+        val b = ble
+        val rows = ArrayList<StatusRow>()
+        rows += StatusRow("Bluetooth", bt, if (bt) "On" else "Off")
+        rows += StatusRow("Bluetooth LE advertising", b?.active == true && b.advertisingOk, if (b?.advertisingOk == true) "Other devices can hear this device" else "Not advertising")
+        rows += StatusRow("Bluetooth LE scan", b?.active == true && !b.scanFailed && (b.lastScanStart > 0L),
+            if (b?.scanFailed == true) "Failed, being set up again" else "Running since ${ago(b?.lastScanStart ?: 0L)}")
+        rows += StatusRow("Heard over Bluetooth LE", now - (b?.lastPeerAt ?: 0L) < 15_000, "Last device ${ago(b?.lastPeerAt ?: 0L)}")
+        rows += StatusRow("Bluetooth clipboard service", ClipSync.gattUp, if (ClipSync.gattUp) "Ready for clips over Bluetooth" else "Not registered")
+        rows += StatusRow("Wi-Fi link", now - (link?.lastHeard ?: 0L) < 15_000, "Last device ${ago(link?.lastHeard ?: 0L)}")
+        rows += StatusRow("Wi-Fi clipboard port", ClipSync.portOpen, if (ClipSync.portOpen) "Listening" else "Not listening")
+        rows += StatusRow("Switching link now", null, EhState.transport)
+        for ((dev, ps) in EhState.peers.toSortedMap()) {
+            val hosts = EhState.wifiHostsOf(dev).mapNotNull { it.hostAddress }
+            val off = ClockGuard.shared.offset(dev)
+            val clock = when { off == null -> "clock unknown"; Math.abs(off) < 2000 -> "clock in step"; else -> "clock ${if (off > 0) "ahead" else "behind"} by ${Math.abs(off) / 1000} s" }
+            val refused = EhState.clockRefused[dev]?.takeIf { now - it < 300_000 }?.let { ", copies refused for the clock ${ago(it)}" } ?: ""
+            val bleAt = EhState.bleDevices[dev]?.second ?: 0L
+            rows += StatusRow(ClipSync.pretty(dev), now - ps.seenAt < 15_000,
+                "Heard ${ago(ps.seenAt)} over ${if (ps.via == "ble") "Bluetooth LE" else "Wi-Fi"} · Bluetooth LE ${ago(bleAt)} · " +
+                    (if (hosts.isEmpty()) "no Wi-Fi address" else "Wi-Fi ${hosts.joinToString(", ")}") + " · $clock$refused")
+        }
+        return rows
+    }
+
     /** Sets up everything that registers with Android's Bluetooth again, after it came back on. */
     private fun recoverBluetooth() {
         try { ble?.restart("Bluetooth came back") } catch (e: Exception) { EhLog.w("ble restart failed: ${e.message}") }

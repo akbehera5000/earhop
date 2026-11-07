@@ -6,7 +6,11 @@ import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
 /** One clipboard item travelling between devices. */
-data class ClipItem(val id: String, val dev: String, val kind: String, val mime: String, val ts: Long, val data: ByteArray)
+/**
+ * One item travelling between devices. kind "text" and "image" are clips; "ack" (delivery receipt, data = clip id),
+ * "diag-req" and "diag" (diagnostics) are control messages. [to] is the one device it is for, or "" for all.
+ */
+data class ClipItem(val id: String, val dev: String, val kind: String, val mime: String, val ts: Long, val data: ByteArray, val to: String = "")
 
 /**
  * The encrypted clipboard frame, identical to ClipCodec in Clipboard.swift on the Mac:
@@ -34,7 +38,7 @@ object ClipCodec {
 
     fun encode(item: ClipItem, secret: String, nonce: ByteArray? = null): ByteArray? = try {
         val header = "{\"dev\":\"${esc(item.dev)}\",\"id\":\"${esc(item.id)}\",\"kind\":\"${esc(item.kind)}\"," +
-            "\"mime\":\"${esc(item.mime)}\",\"ts\":${item.ts},\"v\":1}"
+            "\"mime\":\"${esc(item.mime)}\"," + (if (item.to.isNotEmpty()) "\"to\":\"${esc(item.to)}\"," else "") + "\"ts\":${item.ts},\"v\":1}"
         val h = header.toByteArray()
         val plain = byteArrayOf((h.size shr 8).toByte(), (h.size and 0xFF).toByte()) + h + item.data
         val n = nonce ?: ByteArray(12).also { java.security.SecureRandom().nextBytes(it) }
@@ -53,7 +57,7 @@ object ClipCodec {
             val p = c.doFinal(frame, 16, frame.size - 16)
             val hl = ((p[0].toInt() and 0xFF) shl 8) or (p[1].toInt() and 0xFF)
             val o = parseFlat(String(p, 2, hl, Charsets.UTF_8))
-            ClipItem(o["id"]!!, o["dev"]!!, o["kind"]!!, o["mime"]!!, o["ts"]!!.toLong(), p.copyOfRange(2 + hl, p.size))
+            ClipItem(o["id"]!!, o["dev"]!!, o["kind"]!!, o["mime"]!!, o["ts"]!!.toLong(), p.copyOfRange(2 + hl, p.size), o["to"] ?: "")
         }
     } catch (e: Exception) { null }
 
@@ -191,4 +195,50 @@ class AddressBook<A : Any> {
     }
 
     val devices: Set<String> get() = map.keys.toSet()
+}
+
+/**
+ * Delivery receipts for sent clips (same rule as Receipts in Clipboard.swift): every device that applies a clip answers
+ * with an "ack". Devices that did not answer get the clip again after 5 and 15 s, and after 60 s count as not
+ * delivered. Pure, unit tested.
+ */
+class Receipts {
+    class Entry(val targets: Set<String>, val sentAt: Long) { val delivered = HashSet<String>(); var retries = 0 }
+    private val entries = java.util.concurrent.ConcurrentHashMap<String, Entry>()
+    companion object { val RETRY_AFTER = longArrayOf(5_000, 15_000); const val GIVE_UP = 60_000L }
+
+    fun track(id: String, targets: Set<String>, now: Long) {
+        entries.entries.removeIf { now - it.value.sentAt > 600_000 }
+        entries[id] = Entry(targets, now)
+    }
+
+    /** Records a receipt; true when it was new. */
+    @Synchronized fun ack(id: String, dev: String): Boolean {
+        val e = entries[id] ?: return false
+        if (dev !in e.targets || dev in e.delivered) return false
+        e.delivered += dev
+        return true
+    }
+
+    /** Clips to send again now, and to whom. */
+    @Synchronized fun due(now: Long): List<Pair<String, List<String>>> = entries.mapNotNull { (id, e) ->
+        val waiting = e.targets - e.delivered
+        if (waiting.isEmpty() || e.retries >= RETRY_AFTER.size || now - e.sentAt < RETRY_AFTER[e.retries]) null
+        else { e.retries++; Pair(id, waiting.sorted()) }
+    }
+
+    fun sentAt(id: String): Long? = entries[id]?.sentAt
+
+    /** "Delivered to Mac ✓, Tablet ✓", plus who is still waited for or did not answer. */
+    @Synchronized fun words(id: String, now: Long, pretty: (String) -> String): String {
+        val e = entries[id] ?: return ""
+        val rest = (e.targets - e.delivered).sorted()
+        val over = now - e.sentAt >= GIVE_UP
+        val parts = ArrayList<String>()
+        if (e.delivered.isNotEmpty()) parts += "Delivered to " + e.delivered.sorted().joinToString(", ") { pretty(it) + " ✓" }
+        if (rest.isNotEmpty()) parts += (if (over) "not delivered to " else "sending to ") + rest.joinToString(", ") { pretty(it) }
+        if (parts.isEmpty()) return ""
+        parts[0] = parts[0].replaceFirstChar { it.uppercase() }
+        return parts.joinToString("; ")
+    }
 }

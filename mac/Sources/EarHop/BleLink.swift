@@ -27,6 +27,8 @@ final class BleLink: NSObject, CBPeripheralManagerDelegate {
 
     /// Any valid name works since v4 (the advertisement carries an id derived from it).
     var supported: Bool { DeviceNames.valid(selfName) }
+    /// Whether macOS is advertising this device's status right now (status page).
+    var advertising: Bool { manager.isAdvertising }
     /// A valid v4 advertisement from an id whose name is not known yet, and where it came from (looked up once).
     var onUnknownId: ((Int, UUID) -> Void)?
 

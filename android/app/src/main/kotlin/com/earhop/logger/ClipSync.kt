@@ -47,6 +47,8 @@ class ClipTcp(private val port: Int = PORT, private val onFrame: (ByteArray) -> 
     private val open = java.util.concurrent.atomic.AtomicInteger(0)
     @Volatile private var server: ServerSocket? = null
     private val pool = Executors.newCachedThreadPool()
+    /** True while the Wi-Fi clipboard port is open (status card). */
+    val listening: Boolean get() = server?.let { it.isBound && !it.isClosed } == true
 
     fun start() {
         Thread({
@@ -258,7 +260,7 @@ class ClipGatt(private val ctx: Context, private val selfName: String, private v
 /** Serves received clipboard images to other apps (the clipboard grants them read access when they paste). */
 class ClipImageProvider : ContentProvider() {
     override fun onCreate() = true
-    override fun getType(uri: Uri) = "image/png"
+    override fun getType(uri: Uri) = if (uri.lastPathSegment?.endsWith(".txt") == true) "text/plain" else "image/png"
     override fun openFile(uri: Uri, mode: String): ParcelFileDescriptor? {
         val f = File(context!!.cacheDir, "clip/" + (uri.lastPathSegment ?: return null))
         return if (f.exists()) ParcelFileDescriptor.open(f, ParcelFileDescriptor.MODE_READ_ONLY) else null
@@ -314,6 +316,8 @@ object ClipSync {
     fun method(ctx: Context) = prefs(ctx).getString("clipTransport", "both") ?: "both"
     /** Devices this one does not send clips to. */
     fun excluded(ctx: Context): Set<String> = prefs(ctx).getStringSet("clipExclude", emptySet()) ?: emptySet()
+    /** Apps (package names) whose copies are never sent automatically. */
+    fun excludedApps(ctx: Context): Set<String> = prefs(ctx).getStringSet("clipExcludeApps", emptySet()) ?: emptySet()
     /** Skip password-like text in automatic sends. Off by default: such text is synced. */
     fun skipPasswords(ctx: Context) = prefs(ctx).getBoolean("clipSkipPasswords", false)
 
@@ -323,7 +327,17 @@ object ClipSync {
      * Recent clips, newest first, kept in memory only: never written to a file or the log, gone when EarHop stops.
      * Text is kept so it can be copied again; images only as an entry.
      */
-    class Recent(val at: Long, val sent: Boolean, val dev: String, val kind: String, val text: String?, val size: Int)
+    class Recent(val at: Long, val sent: Boolean, val dev: String, val kind: String, val text: String?, val size: Int,
+                 val clipId: String = "") {
+        /** For sent clips: "Delivered to Mac ✓, Tablet ✓", who is still waited for, or who did not answer. */
+        @Volatile var receipt = ""
+    }
+    val receipts = Receipts()
+    /** Sent clips kept for a quiet retry until every device confirmed them (at most a minute). */
+    private val outbox = java.util.concurrent.ConcurrentHashMap<String, Pair<ByteArray, String>>()
+    /** A diagnostics reply arrived: (device, text). Set by the screen while it collects. */
+    @Volatile var onDiagnostics: ((String, String) -> Unit)? = null
+    fun pretty(n: String) = when (n) { "mac" -> "Mac"; "phone" -> "Phone"; "tab" -> "Tablet"; else -> n.replaceFirstChar { it.uppercase() } }
     val recent = java.util.concurrent.CopyOnWriteArrayList<Recent>()
     fun keepRecent(ctx: Context) = prefs(ctx).getBoolean("clipHistory", true)
     private fun addRecent(ctx: Context, r: Recent) {
@@ -369,6 +383,9 @@ object ClipSync {
             cm.addPrimaryClipChangedListener(l)
             listener = l
         }
+        main.removeCallbacks(retryTick)
+        retryApp = app
+        main.postDelayed(retryTick, 1000)
         tryStartAuto(app)
         // Keep the helper running: check a minute after start (an existing helper says hello within 60 s), then every
         // minute, and again a minute after Shizuku comes up (after a phone restart it starts later than EarHop).
@@ -376,6 +393,80 @@ object ClipSync {
         helperApp = app
         main.postDelayed(helperWatch, 70_000)
         HelperStarter.onShizukuReady { main.postDelayed({ watchHelper(app) }, 70_000) }
+    }
+
+    @Volatile private var retryApp: Context? = null
+    /** Once a second: sends unconfirmed clips again (after 5 and 15 s) and refreshes the receipt words. */
+    private val retryTick: Runnable = object : Runnable {
+        override fun run() {
+            retryApp?.let { app -> try { retryUnconfirmed(app) } catch (e: Exception) { } }
+            main.postDelayed(this, 1000)
+        }
+    }
+
+    private fun retryUnconfirmed(ctx: Context) {
+        val now = System.currentTimeMillis()
+        for ((id, devs) in receipts.due(now)) {
+            val o = outbox[id] ?: continue
+            Thread { deliver(ctx, o.first, o.second, devs.toSet()) }.start()
+            EhLog.w("clip: no receipt from ${devs.joinToString(", ")} yet, sending again")
+        }
+        for (r in recent) if (r.sent && r.clipId.isNotEmpty()) {
+            val w = receipts.words(r.clipId, now, ::pretty)
+            if (w.isNotEmpty() && w != r.receipt) {
+                r.receipt = w
+                if (w.contains("not delivered")) EhLog.w("clip: ${w.substringAfter("not delivered to ")} did not confirm a clip in 60 s")
+            }
+        }
+        outbox.keys.removeIf { k -> (receipts.sentAt(k) ?: 0L) < now - Receipts.GIVE_UP }
+    }
+
+    /**
+     * Sends a frame to the given devices (null: every device not excluded) over the clipboard's method: text and small
+     * control messages over Bluetooth LE and Wi-Fi, images over Wi-Fi. Returns the links used.
+     */
+    fun deliver(ctx: Context, frame: ByteArray, kind: String, only: Set<String>?): List<String> {
+        val p = prefs(ctx)
+        val name = p.getString("name", "phone") ?: "phone"
+        val mode = method(ctx)
+        val skip = excluded(ctx)
+        fun wanted(d: String) = d != name && (only?.contains(d) ?: (d !in skip))
+        val links = ArrayList<String>()
+        var bleCarries = false
+        if (kind != "image" && mode != "wifi" && frame.size <= ClipGatt.MAX_FRAME) {
+            val now = System.currentTimeMillis()
+            val devs = EhState.bleDevices.filter { wanted(it.key) && now - it.value.second < 60_000 }.map { Pair(it.key, it.value.first) }
+            if (devs.isNotEmpty()) { gatt?.send(frame, devs); links += "Bluetooth"; bleCarries = true }
+        }
+        if (mode != "ble" || !bleCarries) {
+            val hosts = if (only != null) only.flatMap { EhState.wifiHostsOf(it) }.distinct() else EhState.wifiPeers(skip)
+            hosts.forEach { tcp?.send(frame, it) }
+            if (hosts.isNotEmpty()) links += "Wi-Fi"
+        }
+        return links
+    }
+
+    /** A control message (receipt or diagnostics) to one device, or to all when [to] is null. */
+    fun sendControl(ctx: Context, kind: String, data: ByteArray, to: String?) {
+        val p = prefs(ctx)
+        val id = (1..8).joinToString("") { "%02x".format(java.util.Random().nextInt(256)) }
+        val item = ClipItem(id, p.getString("name", "phone") ?: "phone", kind, "application/octet-stream", System.currentTimeMillis(), data, to ?: "")
+        val frame = ClipCodec.encode(item, p.getString("secret", "") ?: "") ?: return
+        remember(id)
+        Thread { deliver(ctx, frame, kind, to?.let { setOf(it) }) }.start()
+    }
+
+    /** Asks every device for its diagnostics; replies arrive through [onDiagnostics]. */
+    fun requestDiagnostics(ctx: Context) = sendControl(ctx, "diag-req", ByteArray(0), null)
+
+    /** This device's part of a diagnostics file: status lines and the end of the log (never clipboard contents). */
+    fun diagnosticsPart(ctx: Context): String {
+        val p = prefs(ctx)
+        val v = try { ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName } catch (e: Exception) { "?" }
+        val head = "EarHop $v on Android ${Build.VERSION.RELEASE}, name ${p.getString("name", "?")}\n" +
+            "transport ${p.getString("transport", "both")} clip method ${method(ctx)} clip sync ${enabled(ctx)} auto method ${autoMethod(ctx)}\n" +
+            EhState.statusLines().joinToString("\n") + "\n--- log ---\n"
+        return head + EhLog.dumpAll(1500).takeLast(50_000)
     }
 
     @Volatile private var helperApp: Context? = null
@@ -562,6 +653,8 @@ object ClipSync {
 
     /** Reads an unknown device's name over its Bluetooth clipboard service. */
     fun lookupName(id: Int, device: BluetoothDevice) { gatt?.lookupName(id, device) }
+    /** Whether the Wi-Fi clipboard port is open (status page). */
+    val portOpen: Boolean get() = tcp?.listening == true
     /** Whether the Bluetooth clipboard service is registered (status page). */
     val gattUp: Boolean get() = gatt?.serviceUp == true
 
@@ -571,14 +664,17 @@ object ClipSync {
     fun stop(ctx: Context) {
         recent.clear()
         main.removeCallbacks(helperWatch)
+        main.removeCallbacks(retryTick)
         stopRootWatch()
         try { listener?.let { (ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager).removePrimaryClipChangedListener(it) } } catch (e: Exception) { }
         tcp?.stop(); gatt?.stop(); tcp = null; gatt = null
     }
 
     /** Reads the clip (call while EarHop has focus or background access) and sends it. */
-    fun sendClip(ctx: Context, clip: ClipData, auto: Boolean = false): String {
+    fun sendClip(ctx: Context, clip: ClipData, auto: Boolean = false, source: String? = null): String {
         if (clip.itemCount == 0) return "The clipboard is empty"
+        // Copies noticed in an excluded app stay here (the app is known when the accessibility trigger saw the copy).
+        if (auto && source != null && source in excludedApps(ctx)) { EhLog.w("clip: not sent, copied in an excluded app"); return "Not sent: excluded app" }
         if (auto && paused(ctx)) return "Clipboard sync is paused"
         val desc = clip.description
         // Automatic sends never pass on what EarHop itself just put on the clipboard (a clip that arrived): Android shows
@@ -619,48 +715,64 @@ object ClipSync {
         val frame = ClipCodec.encode(ClipItem(id, name, kind, mime, System.currentTimeMillis(), data), p.getString("secret", "") ?: "") ?: return "Could not encrypt"
         remember(id)
         lastSentHash = hash
-        val mode = method(ctx)
         val skip = excluded(ctx)
-        val links = ArrayList<String>()
-        // The clipboard's own method (Clipboard card). Text: Bluetooth LE and Wi-Fi at the same time. Images: Wi-Fi only.
-        var bleCarries = false
-        if (kind == "text" && mode != "wifi" && frame.size <= ClipGatt.MAX_FRAME) {
-            val now = System.currentTimeMillis()
-            val devs = EhState.bleDevices.filter { it.key != name && it.key !in skip && now - it.value.second < 60_000 }.map { Pair(it.key, it.value.first) }
-            if (devs.isNotEmpty()) { gatt?.send(frame, devs); links += "Bluetooth"; bleCarries = true }
-        }
-        // Wi-Fi as well, unless "Bluetooth" is chosen and Bluetooth can carry this clip (images and text over 64 KB cannot).
-        if (mode != "ble" || !bleCarries) {
-            val hosts = EhState.wifiPeers(skip)
-            hosts.forEach { tcp?.send(frame, it) }
-            if (hosts.isNotEmpty()) links += "Wi-Fi"
-        }
+        val now = System.currentTimeMillis()
+        val targets = (EhState.bleDevices.filter { now - it.value.second < 60_000 }.keys + EhState.peers.keys)
+            .filter { it != name && it !in skip }.toSet()
+        val links = deliver(ctx, frame, kind, null)
         val what = if (kind == "text") "text (${data.size} bytes)" else "image (${data.size / 1024} KB)"
         return if (links.isEmpty()) {
-            EhLog.w("clip: $what not sent, no other device ${if (kind == "image") "on Wi-Fi" else "in reach"} (method $mode)")
+            EhLog.w("clip: $what not sent, no other device ${if (kind == "image") "on Wi-Fi" else "in reach"} (method ${method(ctx)})")
             event("Not sent, no device in reach")
             "No other device in reach"
         } else {
             EhLog.w("clip: sent $what over ${links.joinToString(" and ")}")
             event("Sent ${if (kind == "text") "text" else "an image"}")
-            addRecent(ctx, Recent(System.currentTimeMillis(), true, "", kind,
-                if (kind == "text" && data.size <= 100_000) String(data, Charsets.UTF_8) else null, data.size))
+            receipts.track(id, targets, now)
+            outbox[id] = Pair(frame, kind)
+            addRecent(ctx, Recent(now, true, "", kind,
+                if (kind == "text" && data.size <= 100_000) String(data, Charsets.UTF_8) else null, data.size, id).also {
+                    if (targets.isNotEmpty()) it.receipt = "Sending to " + targets.sorted().joinToString(", ") { t -> pretty(t) }
+                })
             "Sent to your other devices"
         }
     }
 
     @Synchronized private fun remember(id: String) { seen += id; while (seen.size > 100) seen.removeAt(0) }
-    @Synchronized private fun known(id: String) = id in seen
+    /** True the first time an id is seen (and records it), false for every later copy. */
+    @Synchronized private fun firstTime(id: String): Boolean { if (id in seen) return false; remember(id); return true }
 
     private fun receive(ctx: Context, frame: ByteArray, via: String) {
-        if (!enabled(ctx) || !receiving(ctx) || paused(ctx)) return
         val p = prefs(ctx)
         val item = ClipCodec.decode(frame, p.getString("secret", "") ?: "") ?: return
-        if (item.dev == p.getString("name", "phone")) return
+        val self = p.getString("name", "phone")
+        if (item.dev == self || (item.to.isNotEmpty() && item.to != self)) return
+        // Receipts and diagnostics work whatever the clipboard settings; clips only when receiving is on.
+        val content = item.kind == "text" || item.kind == "image"
+        if (content && (!enabled(ctx) || !receiving(ctx) || paused(ctx))) return
         // Within 5 minutes by the sender's own clock (its offset is learned from its status), so clocks may differ.
-        if (!ClockGuard.shared.fresh(item.dev, item.ts, System.currentTimeMillis(), ClipCodec.MAX_AGE_MS) || known(item.id)) return
-        remember(item.id)
-        main.post { apply(ctx, item, via) }
+        if (!ClockGuard.shared.fresh(item.dev, item.ts, System.currentTimeMillis(), ClipCodec.MAX_AGE_MS)) return
+        // Checked and recorded in one step: the copies over Bluetooth LE and Wi-Fi can arrive at the same moment.
+        if (!firstTime(item.id)) {
+            // A second copy (the other link, or a retry because the receipt was lost) is confirmed again.
+            if (content) sendControl(ctx, "ack", item.id.toByteArray(), item.dev)
+            return
+        }
+        when (item.kind) {
+            "ack" -> {
+                val id = String(item.data, Charsets.UTF_8)
+                if (receipts.ack(id, item.dev)) {
+                    val w = receipts.words(id, System.currentTimeMillis(), ::pretty)
+                    recent.firstOrNull { it.clipId == id }?.receipt = w
+                }
+            }
+            "diag-req" -> {
+                EhLog.w("diag: ${item.dev} asked for diagnostics")
+                sendControl(ctx, "diag", diagnosticsPart(ctx).toByteArray(), item.dev)
+            }
+            "diag" -> onDiagnostics?.invoke(item.dev, String(item.data, Charsets.UTF_8))
+            else -> main.post { apply(ctx, item, via) }
+        }
     }
 
     private fun apply(ctx: Context, item: ClipItem, via: String) {
@@ -680,6 +792,7 @@ object ClipSync {
         lastReceivedHash = if (item.kind == "text") String(item.data, Charsets.UTF_8).toByteArray().contentHashCode() else item.data.contentHashCode()
         try { cm.setPrimaryClip(clip) } catch (e: Exception) { EhLog.w("clip: could not set the clipboard: ${e.message}"); return }
         EhLog.w("clip: received ${item.kind} from ${item.dev} over $via")
+        sendControl(ctx, "ack", item.id.toByteArray(), item.dev)
         event("Received ${if (item.kind == "text") "text" else "an image"} from ${item.dev}")
         addRecent(ctx, Recent(System.currentTimeMillis(), false, item.dev, item.kind,
             if (item.kind == "text" && item.data.size <= 100_000) String(item.data, Charsets.UTF_8) else null, item.data.size))
@@ -712,7 +825,8 @@ class ClipActivity : Activity() {
         done = true
         val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
         val clip = cm.primaryClip
-        val msg = if (!EhState.running) "Start EarHop first" else if (clip == null) "The clipboard is empty" else ClipSync.sendClip(applicationContext, clip, auto)
+        val msg = if (!EhState.running) "Start EarHop first" else if (clip == null) "The clipboard is empty"
+            else ClipSync.sendClip(applicationContext, clip, auto, intent?.getStringExtra("source"))
         // Automatic sends stay silent; only a manual send confirms with a toast.
         if (!auto) Toast.makeText(applicationContext, msg, Toast.LENGTH_SHORT).show()
         finish()

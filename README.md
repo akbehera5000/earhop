@@ -98,6 +98,14 @@ itself whenever it is not running, also after a restart. Without Shizuku, start 
 over USB debugging (`bash tools/phone_clip.sh`). Without the helper, send from Android with the Share clipboard tile, the
 notification button or Share. Passwords marked as secret by a password manager are never sent.
 
+* **Delivery receipts:** each device confirms every clip it puts on its clipboard. The recent list shows "Delivered to
+  Mac ✓, Tablet ✓"; a device that did not confirm gets the clip again after 5 and 15 seconds, and after a minute it says
+  "not delivered".
+* **Skip password-like text** (off by default): when on, copies that look like a password (one word, 8 to 64 characters
+  with at least three kinds of characters; never links or email addresses) are not sent automatically.
+* **Exclude apps:** copies made in these apps stay on the device. On the Mac this is the app in front when you copy; on
+  Android EarHop knows the app only when the accessibility method noticed the copy.
+
 ## Quick controls
 
 * **Mac:** menu bar popover (Take, Release, noise control for Buds, devices, recent events, diagnostics), the global hotkey
@@ -107,7 +115,14 @@ notification button or Share. Passwords marked as secret by a password manager a
 
 ## Troubleshooting
 
-Both apps write the same kinds of log lines. Mac: `~/.earhop/earhop.log` or **Copy log**. Android: **Copy log** in the Activity card.
+**Status** (Mac: Settings, Status; Android: Devices, Status) shows whether each link really works right now: Bluetooth LE
+advertising and scan, the Bluetooth clipboard service, the Wi-Fi link and clipboard port, and for every device when and
+over which link it was last heard, its Wi-Fi address and whether its clock is in step. **Copy diagnostics** there asks
+every device for its status and the end of its log and puts everything in one file (Mac: in Downloads; Android: the share
+sheet). Logs never contain clipboard contents.
+
+Both apps write the same kinds of log lines. Mac: `~/.earhop/earhop.log` or **Copy log**. Android: **Copy log** in the
+Activity card, or `adb shell cat /sdcard/Android/data/com.earhop.logger/files/earhop.log` from a computer.
 
 | Log line | Meaning |
 | --- | --- |
@@ -118,7 +133,7 @@ Both apps write the same kinds of log lines. Mac: `~/.earhop/earhop.log` or **Co
 | `info: Claim failed (...): mac is still connected to the Buds` | Why a switch failed, with the next step |
 | `media: explicit pause sent`, `media: explicit commands work on this Mac` | How the Mac pauses and plays |
 | `buds: frame checksums verified` | The Galaxy Buds status channel is healthy |
-| `link: phone is at 192.168.1.20` | A peer was heard and is now also reached directly |
+| `link: phone is at 192.0.2.20` | A peer was heard and is now also reached directly |
 | `system: woke up`, `network: Wi-Fi` | Sleep and network changes, which explain peers going quiet |
 
 Common problems:

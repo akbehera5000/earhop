@@ -25,6 +25,10 @@ enum PasswordLike {
 /// One clip in the popover's recent list.
 struct ClipRecent: Identifiable {
     let id = UUID()
+    /// The clip's id on the wire, so delivery receipts can be matched to it.
+    var clipId = ""
+    /// For sent clips: who confirmed it ("Delivered to Mac ✓, Tablet ✓"), who is still waited for, who never answered.
+    var receipt = ""
     var sent: Bool
     var dev: String // who it came from, or who it went to
     var kind: String
@@ -36,10 +40,70 @@ struct ClipRecent: Identifiable {
 struct ClipItem {
     var id: String
     var dev: String
-    var kind: String // "text" or "image"
+    /// "text" and "image" are clips; "ack" (a delivery receipt, data = clip id), "diag-req" and "diag" (diagnostics)
+    /// are control messages between devices.
+    var kind: String
     var mime: String
     var ts: Int64
     var data: Data
+    /// The one device this is for, or "" for every device.
+    var to: String = ""
+}
+
+/// Delivery receipts for sent clips: every device that applies a clip answers with an "ack". Devices that did not
+/// answer get the clip again after 5 and 15 s (quietly; the clip id stops a second copy there), and after 60 s count as
+/// not delivered. Same rule as Receipts in ClipCodec.kt. Pure, tested by the self test.
+final class Receipts {
+    struct Entry { var targets: Set<String>; var delivered: Set<String> = []; var sentAt: Date; var retries = 0 }
+    private(set) var entries: [String: Entry] = [:]
+    static let retryAfter: [TimeInterval] = [5, 15]
+    static let giveUp: TimeInterval = 60
+
+    func track(_ id: String, targets: Set<String>, now: Date) {
+        entries = entries.filter { now.timeIntervalSince($0.value.sentAt) < 600 }
+        entries[id] = Entry(targets: targets, sentAt: now)
+    }
+
+    /// Records a receipt; true when it was new.
+    @discardableResult
+    func ack(_ id: String, from dev: String) -> Bool {
+        guard var e = entries[id], e.targets.contains(dev), !e.delivered.contains(dev) else { return false }
+        e.delivered.insert(dev)
+        entries[id] = e
+        return true
+    }
+
+    /// Clips to send again now, and to whom.
+    func due(now: Date) -> [(id: String, devs: [String])] {
+        var out: [(String, [String])] = []
+        for (id, var e) in entries {
+            let waiting = e.targets.subtracting(e.delivered)
+            guard !waiting.isEmpty, e.retries < Receipts.retryAfter.count,
+                  now.timeIntervalSince(e.sentAt) >= Receipts.retryAfter[e.retries] else { continue }
+            e.retries += 1
+            entries[id] = e
+            out.append((id, waiting.sorted()))
+        }
+        return out
+    }
+
+    func state(_ id: String, now: Date) -> (delivered: [String], waiting: [String], failed: [String]) {
+        guard let e = entries[id] else { return ([], [], []) }
+        let rest = e.targets.subtracting(e.delivered).sorted()
+        let over = now.timeIntervalSince(e.sentAt) >= Receipts.giveUp
+        return (e.delivered.sorted(), over ? [] : rest, over ? rest : [])
+    }
+
+    /// "Delivered to Mac ✓, Tablet ✓", plus who is still waited for or did not answer.
+    func words(_ id: String, now: Date) -> String {
+        let st = state(id, now: now)
+        var parts: [String] = []
+        if !st.delivered.isEmpty { parts.append("Delivered to " + st.delivered.map { DeviceName.pretty($0) + " ✓" }.joined(separator: ", ")) }
+        if !st.waiting.isEmpty { parts.append("sending to " + st.waiting.map(DeviceName.pretty).joined(separator: ", ")) }
+        if !st.failed.isEmpty { parts.append("not delivered to " + st.failed.map(DeviceName.pretty).joined(separator: ", ")) }
+        guard let first = parts.first else { return "" }
+        return ([first.prefix(1).uppercased() + first.dropFirst()] + parts.dropFirst()).joined(separator: "; ")
+    }
 }
 
 /// The encrypted frame, identical on Android (ClipCodec.kt):
@@ -56,7 +120,8 @@ enum ClipCodec {
     }
 
     static func encode(_ item: ClipItem, secret: String, nonce: Data? = nil) -> Data? {
-        let header: [String: Any] = ["v": 1, "id": item.id, "dev": item.dev, "kind": item.kind, "mime": item.mime, "ts": item.ts]
+        var header: [String: Any] = ["v": 1, "id": item.id, "dev": item.dev, "kind": item.kind, "mime": item.mime, "ts": item.ts]
+        if !item.to.isEmpty { header["to"] = item.to }
         guard let h = try? JSONSerialization.data(withJSONObject: header, options: [.sortedKeys]), h.count < 65536 else { return nil }
         var plain = Data([UInt8(h.count >> 8), UInt8(h.count & 0xFF)])
         plain.append(h)
@@ -79,7 +144,7 @@ enum ClipCodec {
               let o = try? JSONSerialization.jsonObject(with: Data(p[2 ..< 2 + hl])) as? [String: Any],
               let id = o["id"] as? String, let dev = o["dev"] as? String, let kind = o["kind"] as? String,
               let mime = o["mime"] as? String, let ts = (o["ts"] as? NSNumber)?.int64Value else { return nil }
-        return ClipItem(id: id, dev: dev, kind: kind, mime: mime, ts: ts, data: Data(p[(2 + hl)...]))
+        return ClipItem(id: id, dev: dev, kind: kind, mime: mime, ts: ts, data: Data(p[(2 + hl)...]), to: o["to"] as? String ?? "")
     }
 }
 
@@ -129,6 +194,8 @@ final class ClipTcp {
     init(port: UInt16 = ClipTcp.defaultPort) { self.port = port }
     static let maxFrame = 16 * 1024 * 1024
     private var listener: NWListener?
+    /// True while the Wi-Fi clipboard port is open (status page).
+    private(set) var listening = false
     private let queue = DispatchQueue(label: "earhop.clip.tcp")
     var onFrame: ((Data) -> Void)?
 
@@ -136,7 +203,10 @@ final class ClipTcp {
         do {
             let l = try NWListener(using: .tcp, on: NWEndpoint.Port(rawValue: port)!)
             l.newConnectionHandler = { [weak self] c in self?.serve(c) }
-            l.stateUpdateHandler = { s in if case .failed(let e) = s { Log.write("clip: Wi-Fi listener failed \(e)") } }
+            l.stateUpdateHandler = { [weak self] s in
+                if case .failed(let e) = s { Log.write("clip: Wi-Fi listener failed \(e)") }
+                if case .ready = s { self?.listening = true } else if case .failed = s { self?.listening = false } else if case .cancelled = s { self?.listening = false }
+            }
             l.start(queue: queue)
             listener = l
         } catch { Log.write("clip: Wi-Fi listener not started: \(error)") }
@@ -245,9 +315,17 @@ final class ClipBle: NSObject, CBPeripheralManagerDelegate, CBCentralManagerDele
 
     /// This device's name, served by the name characteristic so others can map its Bluetooth LE id to it.
     var selfName = ""
+    /// True once macOS confirmed the clipboard service was added (status page).
+    private(set) var serviceUp = false
+    var centralOn: Bool { central.state == .poweredOn }
+
+    func peripheralManager(_ p: CBPeripheralManager, didAdd service: CBService, error: Error?) {
+        serviceUp = error == nil
+        if let error { Log.write("clip: Bluetooth clipboard service not added: \(error.localizedDescription)") }
+    }
 
     func peripheralManagerDidUpdateState(_ p: CBPeripheralManager) {
-        guard p.state == .poweredOn else { return }
+        guard p.state == .poweredOn else { serviceUp = false; return }
         // Both need an encrypted link: the first connection between two devices asks once to pair them. Paired devices
         // recognise each other's changing Bluetooth addresses, so a send never goes to an address that is gone.
         let ch = CBMutableCharacteristic(type: ClipBle.inbox, properties: [.write, .writeWithoutResponse], value: nil,
@@ -396,6 +474,15 @@ final class ClipSync {
     var blePeers: () -> [(dev: String, id: UUID)] = { [] }
     var onEvent: ((String) -> Void)?
     var onRecord: ((ClipRecent) -> Void)?
+    /// A delivery receipt changed for a sent clip: (clip id, words for the recent list).
+    var onReceipt: ((String, String) -> Void)?
+    /// Another device asked for diagnostics: return this Mac's part (status and the end of its log).
+    var diagnostics: () -> String = { "" }
+    /// A diagnostics reply arrived: (device, text).
+    var onDiagnostics: ((String, String) -> Void)?
+    let receipts = Receipts()
+    /// Sent clips kept for a quiet retry until every device confirmed them (at most a minute).
+    private var outbox: [String: (frame: Data, kind: String, at: Date)] = [:]
     /// Sync is paused until then (set from the popover).
     var pausedUntil = Date.distantPast
     private var paused: Bool { pausedUntil > Date() }
@@ -417,11 +504,68 @@ final class ClipSync {
 
     /// Called about twice a second from the main loop.
     func poll() {
+        retryUnconfirmed()
         let pb = NSPasteboard.general
         guard pb.changeCount != lastChange else { return }
         lastChange = pb.changeCount
         guard cfg.clipSync, cfg.clipAuto, !paused, pb.changeCount != ownWrite else { return }
+        // Copies made in an excluded app (Settings, Clipboard, Exclude apps) stay on this Mac.
+        if let app = NSWorkspace.shared.frontmostApplication?.bundleIdentifier, cfg.clipExcludeApps.contains(app) {
+            Log.write("clip: not sent, copied in an excluded app")
+            return
+        }
         sendCurrent()
+    }
+
+    /// Sends unconfirmed clips again to the devices that have not answered (after 5 and 15 s), and refreshes the words.
+    private func retryUnconfirmed() {
+        let now = Date()
+        for (id, devs) in receipts.due(now: now) {
+            guard let o = outbox[id] else { continue }
+            deliver(o.frame, kind: o.kind, to: Set(devs))
+            Log.write("clip: no receipt from \(devs.joined(separator: ", ")) yet, sending again")
+        }
+        for (id, o) in outbox where now.timeIntervalSince(o.at) >= Receipts.giveUp {
+            outbox[id] = nil
+            onReceipt?(id, receipts.words(id, now: now))
+            let st = receipts.state(id, now: now)
+            if !st.failed.isEmpty { Log.write("clip: not delivered to \(st.failed.joined(separator: ", ")) (no receipt in 60 s)") }
+        }
+    }
+
+    /// Sends a frame to the given devices (nil: every device not excluded) over the clipboard's method: text and small
+    /// control messages over Bluetooth LE and Wi-Fi, larger items over Wi-Fi. Returns the links used.
+    @discardableResult
+    private func deliver(_ frame: Data, kind: String, to only: Set<String>?) -> [String] {
+        let skip = Set(cfg.clipExclude)
+        func wanted(_ d: String) -> Bool { only.map { $0.contains(d) } ?? !skip.contains(d) }
+        let wifi = wifiPeers().filter { wanted($0.dev) }.map(\.host)
+        var links: [String] = []
+        var bleCarries = false
+        if kind != "image", cfg.clipTransport != "wifi", frame.count <= ClipBle.maxFrame {
+            let peers = blePeers().filter { wanted($0.dev) }
+            if !peers.isEmpty { ble.send(frame, to: peers); links.append("Bluetooth"); bleCarries = true }
+        }
+        // Wi-Fi as well, unless "Bluetooth" is chosen and Bluetooth can carry this (images and over 64 KB cannot).
+        if cfg.clipTransport != "ble" || !bleCarries {
+            for h in wifi { tcp.send(frame, to: h) }
+            if !wifi.isEmpty { links.append("Wi-Fi") }
+        }
+        return links
+    }
+
+    /// A control message (receipt or diagnostics) to one device, or to all when `to` is nil.
+    private func sendControl(kind: String, data: Data, to dev: String?) {
+        let id = (0 ..< 8).map { _ in String(format: "%02x", UInt8.random(in: 0 ... 255)) }.joined()
+        let item = ClipItem(id: id, dev: cfg.deviceName, kind: kind, mime: "application/octet-stream", ts: Proto.nowMs(), data: data, to: dev ?? "")
+        guard let frame = ClipCodec.encode(item, secret: cfg.secret) else { return }
+        remember(id)
+        deliver(frame, kind: kind, to: dev.map { [$0] })
+    }
+
+    /// Asks every device for its diagnostics; replies arrive through onDiagnostics.
+    func requestDiagnostics() {
+        sendControl(kind: "diag-req", data: Data(), to: nil)
     }
 
     /// Send clipboard now (popover button), also when automatic sending is off.
@@ -461,19 +605,8 @@ final class ClipSync {
         guard let frame = ClipCodec.encode(item, secret: cfg.secret) else { return }
         remember(id)
         let skip = Set(cfg.clipExclude)
-        let wifi = wifiPeers().filter { !skip.contains($0.dev) }.map(\.host)
-        var links: [String] = []
-        // The clipboard's own method (Settings, Clipboard). Text: Bluetooth LE and Wi-Fi at the same time. Images: Wi-Fi only.
-        var bleCarries = false
-        if kind == "text", cfg.clipTransport != "wifi", frame.count <= ClipBle.maxFrame {
-            let peers = blePeers().filter { !skip.contains($0.dev) }
-            if !peers.isEmpty { ble.send(frame, to: peers); links.append("Bluetooth"); bleCarries = true }
-        }
-        // Wi-Fi as well, unless "Bluetooth" is chosen and Bluetooth can carry this clip (images and text over 64 KB cannot).
-        if cfg.clipTransport != "ble" || !bleCarries {
-            for h in wifi { tcp.send(frame, to: h) }
-            if !wifi.isEmpty { links.append("Wi-Fi") }
-        }
+        let targets = Set(blePeers().map(\.dev) + wifiPeers().map(\.dev)).subtracting(skip).subtracting([cfg.deviceName])
+        let links = deliver(frame, kind: kind, to: nil)
         let what = kind == "text" ? "text (\(data.count) bytes)" : "image (\(data.count / 1024) KB)"
         if links.isEmpty {
             Log.write("clip: \(what) not sent, no other device \(kind == "image" ? "on Wi-Fi" : "in reach")")
@@ -481,9 +614,11 @@ final class ClipSync {
         } else {
             Log.write("clip: sent \(what) over \(links.joined(separator: " and "))")
             onEvent?("Sent \(kind == "text" ? "text" : "an image")")
-            let to = (blePeers().map(\.dev) + wifiPeers().map(\.dev)).filter { !skip.contains($0) }
-            let names = Array(Set(to)).sorted().map(DeviceName.pretty).joined(separator: ", ")
-            onRecord?(ClipRecent(sent: true, dev: names.isEmpty ? "your devices" : names, kind: kind,
+            receipts.track(id, targets: targets, now: Date())
+            outbox[id] = (frame, kind, Date())
+            let names = targets.sorted().map(DeviceName.pretty).joined(separator: ", ")
+            onRecord?(ClipRecent(clipId: id, receipt: targets.isEmpty ? "" : "Sending to \(names)", sent: true,
+                                 dev: names.isEmpty ? "your devices" : names, kind: kind,
                                  text: kind == "text" ? String(data: data, encoding: .utf8) : nil, image: kind == "image" ? data : nil))
         }
     }
@@ -502,16 +637,38 @@ final class ClipSync {
     }
 
     private func receive(_ frame: Data, via: String) {
-        guard cfg.clipSync, cfg.clipReceive, !paused, let item = ClipCodec.decode(frame, secret: cfg.secret) else { return }
+        guard let item = ClipCodec.decode(frame, secret: cfg.secret) else { return }
+        // Receipts and diagnostics work whatever the clipboard settings; clips only when receiving is on.
+        let content = item.kind == "text" || item.kind == "image"
+        guard !content || (cfg.clipSync && cfg.clipReceive && !paused) else { return }
         // Within 5 minutes by the sender's own clock (its offset is learned from its status), so clocks may differ.
         guard item.dev != cfg.deviceName,
               ClockGuard.shared.fresh(dev: item.dev, senderMs: item.ts, nowMs: Proto.nowMs(), maxAgeMs: ClipCodec.maxAgeMs) else { return }
+        guard item.to.isEmpty || item.to == cfg.deviceName else { return }
+        // Checked and recorded in one step: the copies over Bluetooth LE and Wi-Fi can arrive at the same moment.
         lock.lock()
         let dup = seen.contains(item.id)
+        if !dup { seen.append(item.id); if seen.count > 100 { seen.removeFirst(seen.count - 100) } }
         lock.unlock()
-        if dup { return } // the copy from the other link already arrived
-        remember(item.id)
-        DispatchQueue.main.async { self.apply(item, via: via) }
+        // A second copy (the other link, or a retry because the first receipt was lost) is confirmed again.
+        if dup {
+            if content { DispatchQueue.main.async { self.sendControl(kind: "ack", data: Data(item.id.utf8), to: item.dev) } }
+            return
+        }
+        DispatchQueue.main.async {
+            switch item.kind {
+            case "ack":
+                let id = String(data: item.data, encoding: .utf8) ?? ""
+                if self.receipts.ack(id, from: item.dev) { self.onReceipt?(id, self.receipts.words(id, now: Date())) }
+            case "diag-req":
+                Log.write("diag: \(item.dev) asked for diagnostics")
+                self.sendControl(kind: "diag", data: Data(self.diagnostics().utf8), to: item.dev)
+            case "diag":
+                self.onDiagnostics?(item.dev, String(data: item.data, encoding: .utf8) ?? "")
+            default:
+                self.apply(item, via: via)
+            }
+        }
     }
 
     private func apply(_ item: ClipItem, via: String) {
@@ -526,6 +683,7 @@ final class ClipSync {
         ownWrite = pb.changeCount
         lastChange = pb.changeCount
         Log.write("clip: received \(item.kind) from \(item.dev) over \(via)")
+        sendControl(kind: "ack", data: Data(item.id.utf8), to: item.dev)
         onRecord?(ClipRecent(sent: false, dev: DeviceName.pretty(item.dev), kind: item.kind,
                              text: item.kind == "text" ? String(data: item.data, encoding: .utf8) : nil, image: item.kind == "image" ? item.data : nil))
         onEvent?("Received \(item.kind == "text" ? "text" : "an image") from \(item.dev)")

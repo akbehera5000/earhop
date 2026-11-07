@@ -1,5 +1,19 @@
 # Changelog
 
+## 2026-11-08, stage 2 of the list: status, diagnostics, receipts, exclude apps (Mac and Android 1.3.1)
+
+* Status page on every device (Mac: Settings, Status; Android: Devices, Status): Bluetooth LE advertising and scan, the
+  Bluetooth clipboard service, the Wi-Fi link and clipboard port, each working or not; every device with when and how it
+  was last heard, its Wi-Fi addresses and its clock. Ages are coarse so the Android page still settles.
+* Copy diagnostics: asks every device for its status and the end of its log over the link and makes one file (Mac:
+  Downloads, Android: share sheet). Tested from the phone: parts from the phone, the Mac and the tablet.
+* Delivery receipts: every clip is confirmed by each device; the recent list shows "Delivered to Mac ✓, Tablet ✓".
+  Devices that did not confirm get it again after 5 and 15 s; after 60 s it says not delivered. Tested: receipts from
+  both devices, and the retries with the tablet paused.
+* Exclude apps for the clipboard (Mac: the app in front; Android: the app the accessibility method saw).
+* Fixed: a message arriving over Bluetooth LE and Wi-Fi at the same moment could be handled twice.
+* Tests: receipts, the recipient field (Mac self test and Android, 97 tests).
+
 ## 2026-11-08, stage 1 of the fix list: new link format, pairing, fixes (Mac and Android 1.3.0)
 
 All devices must run 1.3.0: the link format changed (a 1.3 device still reads older devices; older devices cannot read

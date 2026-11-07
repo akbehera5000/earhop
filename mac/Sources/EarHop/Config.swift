@@ -59,6 +59,8 @@ struct Config: Codable, Equatable {
     /// Skip text that looks like a password (one word, 8 to 64 characters, at least 3 kinds of characters). Off by
     /// default: such text is synced. Items password managers mark as concealed are never sent either way.
     var clipSkipPasswords: Bool = false
+    /// Apps (bundle identifiers) whose copies are never sent automatically.
+    var clipExcludeApps: [String] = []
     /// Every device name seen so far (besides mac, phone and tab), so Bluetooth LE ids are known after a restart.
     var knownDevices: [String] = []
     /// Recent clips kept in the popover (memory only); 0 turns the list off.
@@ -106,6 +108,7 @@ struct Config: Codable, Equatable {
         opt(.clipAuto, &base.clipAuto); opt(.clipReceive, &base.clipReceive); opt(.clipExclude, &base.clipExclude)
         opt(.clipNotify, &base.clipNotify); opt(.clipHistory, &base.clipHistory)
         opt(.clipSkipPasswords, &base.clipSkipPasswords); opt(.knownDevices, &base.knownDevices)
+        opt(.clipExcludeApps, &base.clipExcludeApps)
         opt(.autoSwitch, &base.autoSwitch); opt(.earbudsMode, &base.earbudsMode); opt(.speakerFallback, &base.speakerFallback)
         self = base
     }

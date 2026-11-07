@@ -207,6 +207,13 @@ bit3 owner, bit4 call, bit5 earbud profile known, bit6 profile is Galaxy Buds, b
 0xEA/0xEB (mask 0xFE). The old format (0xEA, fixed dev codes, minute stamp) is still read. Changing this format breaks
 the link until every device runs the new build.
 
+Clip frames (`ClipCodec`, AES-256-GCM, identical on both apps) carry a JSON header `{dev,id,kind,mime,[to],ts,v:1}`.
+`to` (optional) names the one device it is for. Kinds: `text`, `image` (clips); `ack` (delivery receipt, data = clip id,
+sent after the clip was put on the clipboard and again for every later copy of it); `diag-req` and `diag`
+(diagnostics, the reply is the status lines plus at most 50 KB of log). `Receipts` (pure, tested): retry the devices that
+did not confirm after 5 and 15 s, "not delivered" after 60 s. The duplicate check is atomic (`firstTime`), as both links
+deliver the same id at the same moment. Receipts and diagnostics bypass the clipboard on/off and pause settings.
+
 Bluetooth clipboard service `EAC1B000-5EED-4C1E-8A00-000000000001`: inbox `...B001` (write, encrypted) and name
 `...B002` (read, encrypted). Encryption makes the first connection between two devices pair them once; paired devices
 resolve each other's changing Bluetooth addresses, which ended the failed first send to Android devices.

@@ -107,6 +107,12 @@ final class Controller {
         peers[s.dev] = Peer(status: s, seenAt: now, lastPlayingAt: last, playingSince: since, via: via)
     }
 
+    /// Every device heard since start: when it was last heard and over which link (status page).
+    func lastHeard() -> [(name: String, at: Date, via: String)] {
+        lock.lock(); defer { lock.unlock() }
+        return peers.values.map { ($0.status.dev, $0.seenAt, $0.via) }.sorted { $0.name < $1.name }
+    }
+
     func peerInfos() -> [PeerInfo] {
         lock.lock(); defer { lock.unlock() }
         let now = Date()

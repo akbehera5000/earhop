@@ -4,6 +4,9 @@ import CoreBluetooth
 /// Reads the AirPods proximity pairing BLE beacon (EXPERIMENTAL byte layout, see project brief).
 final class EarMonitor: NSObject, CBCentralManagerDelegate {
     private var central: CBCentralManager!
+    /// When the Bluetooth scan last reported anything (status page: a working scan sees something every few seconds).
+    private(set) var lastResultAt = Date.distantPast
+    var poweredOn: Bool { central.state == .poweredOn }
     private let minRSSI: Int
     private let allowAnyModel: Bool
     private let knownModels: Set<UInt16>
@@ -89,6 +92,7 @@ final class EarMonitor: NSObject, CBCentralManagerDelegate {
 
     func centralManager(_ c: CBCentralManager, didDiscover p: CBPeripheral,
                         advertisementData: [String: Any], rssi RSSI: NSNumber) {
+        lastResultAt = Date()
         if let uuids = advertisementData[CBAdvertisementDataServiceUUIDsKey] as? [CBUUID], !uuids.isEmpty {
             onServiceUUIDs?(uuids, p.identifier)
         }

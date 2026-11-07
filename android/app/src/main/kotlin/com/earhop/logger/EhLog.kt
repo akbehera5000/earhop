@@ -59,6 +59,9 @@ object EhLog {
     }
 }
 
+/** One line of the Status card: ok true (working), false (not working) or null (just information). */
+data class StatusRow(val title: String, val ok: Boolean?, val detail: String)
+
 data class PeerState(
     val name: String, val playing: Boolean, val ear: String, val owner: Boolean,
     val call: Boolean, val via: String, val seenAt: Long,
@@ -112,6 +115,11 @@ object EhState {
     val bleDevices = java.util.concurrent.ConcurrentHashMap<String, Pair<android.bluetooth.BluetoothDevice, Long>>()
     /** Wi-Fi addresses of the other devices, set by the service. */
     @Volatile var wifiPeers: (Set<String>) -> List<java.net.InetAddress> = { emptyList() }
+    /** Wi-Fi addresses of one device. */
+    @Volatile var wifiHostsOf: (String) -> List<java.net.InetAddress> = { emptyList() }
+    /** The Status card's rows (title, working or not, detail), set by the service. */
+    @Volatile var statusRows: () -> List<StatusRow> = { emptyList() }
+    fun statusLines(): List<String> = statusRows().map { "${it.title}: ${when (it.ok) { true -> "ok"; false -> "NOT working"; null -> "-" }}, ${it.detail}" }
     val history = java.util.concurrent.CopyOnWriteArrayList<Switch>()
     fun record(kind: String, reason: String) {
         history.add(0, Switch(System.currentTimeMillis(), kind, reason))

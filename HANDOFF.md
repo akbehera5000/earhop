@@ -243,6 +243,10 @@ Mac with Buds: if the channel is not open, ear is assumed `both`. The channel cl
     notification was posted but hidden: POST_NOTIFICATIONS was not granted (notification access was). (c) the phone's
     `persist.log.ratelimit=1` dropped EarHop's lines because of a state line every 5 s. Speaker fallback hold is now a
     core rule (`HandoffInput.onSpeaker`) with tests on both platforms. Watchdog backoff is `BleWatchdog`.
+* **2026-11-08, stage 2 (1.3.1).** Control messages over the clip channel (`to`, `ack`, `diag-req`, `diag`), `Receipts`,
+    Status page (Mac StatusView.swift, Android status card from `EarService.statusRows`), Copy diagnostics, Exclude apps.
+    Found while testing: copies of one message over both links arriving together were both handled, because the
+    duplicate check and the record were two steps; now one (`firstTime`).
 
 ## 8. What is built (feature list)
 

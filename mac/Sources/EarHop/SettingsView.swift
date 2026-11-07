@@ -2,7 +2,7 @@ import SwiftUI
 import CoreBluetooth
 
 enum SettingsPage: String, CaseIterable, Identifiable {
-    case general = "General", airpods = "AirPods", buds = "Buds", handoff = "Handoff", connection = "Earbud Link", clipboard = "Clipboard", apps = "Apps", history = "History", network = "Network", log = "Log"
+    case general = "General", airpods = "AirPods", buds = "Buds", handoff = "Handoff", connection = "Earbud Link", clipboard = "Clipboard", apps = "Apps", history = "History", network = "Network", status = "Status", log = "Log"
     var id: String { rawValue }
     var symbol: String {
         switch self {
@@ -15,6 +15,7 @@ enum SettingsPage: String, CaseIterable, Identifiable {
         case .apps: return "app.badge"
         case .history: return "clock.arrow.circlepath"
         case .network: return "network"
+        case .status: return "stethoscope"
         case .log: return "text.alignleft"
         }
     }
@@ -51,6 +52,7 @@ struct SettingsView: View {
                     case .apps: AppsPage(state: state)
                     case .history: HistoryPage(state: state)
                     case .network: NetworkPage(state: state)
+                    case .status: StatusPage(state: state)
                     case .log: LogPage(state: state)
                     }
                 }

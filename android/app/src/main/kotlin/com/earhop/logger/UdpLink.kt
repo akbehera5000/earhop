@@ -153,6 +153,8 @@ class UdpLink(
         return InetAddress.getByAddress(bytes)
     }
 
+    /** Where one device can be reached now. */
+    fun hostsOf(dev: String): List<InetAddress> = current(dev)
     /** Where the other devices can be reached now (see [current]). */
     fun peerHosts(): List<InetAddress> = book.devices.flatMap { current(it) }.distinct()
 
