@@ -7,7 +7,10 @@ entirely on your local network: no cloud, no account.
 | Device | App |
 | --- | --- |
 | Mac (macOS 13 or later, Liquid Glass on macOS 26 and later) | `mac/`, a menu bar app |
-| Android phone and tablet (rooted Android tablet) | `android/`, an app with a foreground service |
+| Android phones and tablets (root optional) | `android/`, an app with a foreground service |
+
+Any number of devices can join, each with its own name. Windows and Linux apps do not exist yet; `docs/PORTING.md`
+describes everything one needs.
 
 ## How switching works
 
@@ -17,6 +20,12 @@ entirely on your local network: no cloud, no account.
 * **Calls first.** A device with a call gets the earbuds; the owner pauses and releases.
 * **Ear removal.** Taking a bud out pauses; putting it back within 2 minutes resumes, but only if EarHop caused the pause.
 * **Safe mode.** After 3 failed switches in a row, automatic switching pauses. Take and Release always work.
+* **Speaker fallback.** With the earbuds out, audio you start plays on the device's speakers and moves back when a bud
+  goes in. Out for 2 minutes lets go of the earbuds, unless sound is playing on the speakers.
+* **Follow my attention** (off by default). Audio started on the device you just unlocked (or, on the Mac, typed on)
+  takes the earbuds even if another device is still playing.
+* **Meetings first.** On the Mac, sound from Zoom, WhatsApp or Teams counts as a call at once; elsewhere a call is
+  noticed from the microphone or Android's call mode.
 
 Both apps run the same state machine (`HandoffCore.swift` and `HandoffCore.kt`) with these states:
 Idle, Playing without earbuds, Switching here (claim pending), Playing, Paused by ear removal, Letting go
@@ -106,12 +115,35 @@ notification button or Share. Passwords marked as secret by a password manager a
 * **Exclude apps:** copies made in these apps stay on the device. On the Mac this is the app in front when you copy; on
   Android EarHop knows the app only when the accessibility method noticed the copy.
 
-## Quick controls
+* **Files and photos:** any size, over Wi-Fi, saved in Downloads (Android: Downloads/EarHop). Mac: the ... menu on
+  the clipboard card, Send files. Android: Share, **Send with EarHop**, or the direct share targets **Send to Mac**,
+  **Send to Tablet** and so on.
+* **Links:** share a web link to EarHop on Android and pick a device to open it there ("continue on Mac"); on the Mac,
+  copy a link and use the ... menu, Open copied link on. A link that arrives on Android is a notification: tap to open.
+* **History:** searchable, with pins. History stays in memory; pinned clips are saved, encrypted with your secret.
 
-* **Mac:** menu bar popover (Take, Release, noise control for Buds, devices, recent events, diagnostics), the global hotkey
+## Earbuds extras
+
+* **Battery:** the device with the earbuds tells the others the levels, so every device shows them (and the Mac menu
+  bar). Low battery alerts at 20 % and 10 % for each bud and the case, on every device (can be switched off).
+* **Same volume:** when the earbuds move, the new device takes the volume the previous one used.
+* **Galaxy Buds per device:** noise control and equalizer chosen on a device are applied whenever the Buds connect to it.
+* **Sleep timer:** pause and let go of the earbuds after 15 to 90 minutes (Mac popover, Android Home).
+* **Shared settings:** switching, clipboard, battery, speaker and sleep timer settings changed on one device change on all.
+
+## Quick controls and automation
+
+* **Mac:** menu bar popover (Take, Release, sleep timer, noise control for Buds, devices, clipboard), the global hotkey
   Control Option Command E, and Settings for everything else.
-* **Android:** quick settings tiles **Take**, **Release** and **Auto switching**; a home screen widget showing where the
-  earbuds are; long press app shortcuts.
+* **Mac automation:** links `earhop://take`, `earhop://release`, `earhop://send-clipboard`, `earhop://sleep?minutes=30`,
+  `earhop://sleep-cancel`, `earhop://diagnostics` (Shortcuts: Open URLs), and AppleScript:
+  `tell application "EarHop" to take earbuds` (also `release earbuds`, `send clipboard`, `start sleep timer 30`,
+  `cancel sleep timer`).
+* **Android:** quick settings tiles **Take**, **Release**, **Auto switching**, **Send clipboard** and **Noise control**; a
+  home screen widget; long press app shortcuts.
+* **Android automation (Tasker):** switch on Settings, Extras, Allow other apps to control EarHop, then send the
+  broadcasts `com.earhop.logger.action.TAKE`, `RELEASE`, `SEND_CLIPBOARD`, `SEND_TEXT` (extra `text`), `SLEEP` (extra
+  `minutes`) or `SLEEP_CANCEL`.
 
 ## Troubleshooting
 

@@ -247,6 +247,12 @@ Mac with Buds: if the channel is not open, ear is assumed `both`. The channel cl
     Status page (Mac StatusView.swift, Android status card from `EarService.statusRows`), Copy diagnostics, Exclude apps.
     Found while testing: copies of one message over both links arriving together were both handled, because the
     duplicate check and the record were two steps; now one (`firstTime`).
+* **2026-11-08, stage 3 (1.4.0).** Files (FileTransfer.swift/.kt, "EHF1" streams on port 47475, records sealed with the
+    position as associated data; the Android share screen opens the input stream itself because the read permission
+    ends with it), links (`link` kind), pins (PinStore, pins.bin), `batt`/`vol`/`settings` control messages
+    (SettingsSync, BatteryAlerts), attention (`att` in the status, core rules on both platforms), sleep timer,
+    earhop:// and AppleScript (EarHop.sdef, Scripting.swift), AutomationReceiver. Found: tests/run.sh piped the Mac
+    self test into tail, so its failure never stopped the run; now checked with pipefail and the exact last line.
 
 ## 8. What is built (feature list)
 

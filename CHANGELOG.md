@@ -1,5 +1,24 @@
 # Changelog
 
+## 2026-11-08, stage 3 of the list: features (Mac and Android 1.4.0)
+
+* Files and photos between devices over Wi-Fi, any size, streamed and encrypted per 1 MB record; Android share target
+  "Send with EarHop" and direct share targets "Send to <device>". Tested: 3 MB from the tablet to the Mac, checksum equal.
+* Open a link on another device ("continue on"): opens at once on the Mac, a tap-to-open notification on Android.
+  Tested both.
+* Searchable clipboard history with pins; pins are saved encrypted with the shared secret. Tested across a restart.
+* Battery levels shared by the device with the earbuds; low battery alerts at 20 % and 10 % per bud and case on every
+  device; the Mac menu bar shows the level also when another device has the earbuds. Tested: levels on the tablet.
+* Follow my attention (off by default), meeting apps count as calls on the Mac, volume handover, per-device Galaxy Buds
+  noise and equalizer, sleep timer.
+* Automation: earhop:// links and AppleScript on the Mac (tested), Tasker broadcasts on Android (off by default).
+* Shared settings: a change on one device applies on all (tested, tablet to Mac and phone).
+* docs/PORTING.md for Windows or Linux apps.
+* tests/run.sh now fails when the Mac self test fails (a pipe hid its result before).
+* Not tried on the real devices yet: sending files from the Mac, direct share targets from a real share sheet, follow
+  my attention, volume handover, Buds per-device settings, battery alerts firing, meeting apps, Tasker broadcasts,
+  automatic image sync from the phone. All have the code and, where pure, unit tests.
+
 ## 2026-11-08, stage 2 of the list: status, diagnostics, receipts, exclude apps (Mac and Android 1.3.1)
 
 * Status page on every device (Mac: Settings, Status; Android: Devices, Status): Bluetooth LE advertising and scan, the

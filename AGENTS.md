@@ -210,7 +210,10 @@ the link until every device runs the new build.
 Clip frames (`ClipCodec`, AES-256-GCM, identical on both apps) carry a JSON header `{dev,id,kind,mime,[to],ts,v:1}`.
 `to` (optional) names the one device it is for. Kinds: `text`, `image` (clips); `ack` (delivery receipt, data = clip id,
 sent after the clip was put on the clipboard and again for every later copy of it); `diag-req` and `diag`
-(diagnostics, the reply is the status lines plus at most 50 KB of log). `Receipts` (pure, tested): retry the devices that
+(diagnostics, the reply is the status lines plus at most 50 KB of log); `link` (open a web link, receipt like a
+clip); `batt` (`L,R,case,chargingL,chargingR,chargingCase` from the device that reads the earbuds); `vol` (0 to 1,
+from the owner); `settings` (SettingsSync: `{"v":{key:value},"t":{key:stamp}}`, newest stamp wins after the clock
+offset). Files: "EHF1" streams on port 47475 (docs/PORTING.md). `Receipts` (pure, tested): retry the devices that
 did not confirm after 5 and 15 s, "not delivered" after 60 s. The duplicate check is atomic (`firstTime`), as both links
 deliver the same id at the same moment. Receipts and diagnostics bypass the clipboard on/off and pause settings.
 
@@ -411,6 +414,6 @@ Tooling notes:
 * Galaxy Buds controls (noise, equalizer, spatial audio, touch lock, Find My Buds) are untested on the real Buds.
 * The Buds frame offsets were never compared against GalaxyBudsClient or captured frames.
 * The Mac app is signed with a local certificate, not a Developer ID, so it is not notarized.
-* Android is `1.3.0` (versionCode 13, release build); the Mac is `1.3.0`.
+* Android is `1.4.0` (versionCode 15, release build); the Mac is `1.4.0`.
 * Shizuku start on boot and the automatic helper restart are not yet confirmed after a real phone restart.
 * Language support is not implemented.
