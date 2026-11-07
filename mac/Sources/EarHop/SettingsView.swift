@@ -140,9 +140,13 @@ private struct GeneralPage: View {
             } header: { Text("Appearance") }
             Section {
                 TextField("Device name", text: $state.cfg.deviceName)
+                if !DeviceNames.valid(state.cfg.deviceName) {
+                    Label("Use 1 to 20 lower case letters, digits or -, starting with a letter or digit.", systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                }
                 Toggle("Live mode", isOn: $state.cfg.liveMode)
             } header: { Text("This device") } footer: {
-                Text("The name must differ on every device and must not contain a vertical bar. Live mode acts on handoff decisions; off is a dry run that only logs.")
+                Text("Any name works, for example mac, work-mac or phone2, but every device needs its own. Restart EarHop after changing it. Live mode acts on handoff decisions; off is a dry run that only logs.")
             }
             Section {
                 LabeledContent("Accessibility (pause and play keys)") { permission(state.keysAllowed) }
@@ -616,12 +620,8 @@ private struct ConnectionPage: View {
                 if state.peers.isEmpty { Text("No other device heard yet").foregroundStyle(.secondary) }
             } header: { Text("Status") }
             Section {
-                Label("Bluetooth LE needs the device names mac, phone and tab.", systemImage: "info.circle")
                 Label("Bluetooth LE reaches about one room; Wi-Fi works across the network.", systemImage: "info.circle")
-                if mode != .wifi && state.cfg.deviceName != "mac" {
-                    Label("This Mac is named \(state.cfg.deviceName), so it cannot use Bluetooth LE. Rename it to mac on the General page.", systemImage: "exclamationmark.triangle.fill")
-                        .foregroundStyle(.orange)
-                }
+                Label("The first Bluetooth clipboard send between two devices asks once to pair them. Accept it on both.", systemImage: "info.circle")
             } header: { Text("Good to know") }
         }
     }

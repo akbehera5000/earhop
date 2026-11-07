@@ -44,8 +44,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         controller = Controller(cfg: cfg, blue: BlueUtil(path: cfg.blueutilPath, address: cfg.activeAddress))
         link = Link(port: cfg.port, secret: cfg.secret, selfName: cfg.deviceName)
         link.onStatus = { [weak self] s in DispatchQueue.main.async {
-            self?.controller.receive(s)
             self?.state.rejected[s.dev] = nil
+            NameBook.shared.add(s.dev)
+            // "Bluetooth" only: Wi-Fi packets (sent for the clipboard) only tell addresses, they do not count for the handoff.
+            if self?.state.cfg.transport == "ble" { return }
+            self?.controller.receive(s)
         } }
         link.onDuplicate = { [weak self] dev in DispatchQueue.main.async { self?.state.duplicates[dev] = Date() } }
         link.onRejected = { [weak self] dev, reason in DispatchQueue.main.async { self?.state.rejected[dev] = (reason, Date()) } }
@@ -54,6 +57,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         link.extraTargets = { [weak self] in self?.discovery.targets ?? [] }
         link.start()
         discovery.start()
+        NameBook.shared.setup(secret: cfg.secret, known: cfg.knownDevices)
+        NameBook.shared.onChange = { [weak self] all in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                let extra = all.filter { !["mac", "phone", "tab"].contains($0) }
+                if extra != self.state.cfg.knownDevices { self.state.cfg.knownDevices = extra }
+            }
+        }
         ble = BleLink(secret: cfg.secret, selfName: cfg.deviceName)
         clip = ClipSync(cfg: cfg)
         clip.wifiPeers = { [weak self] in
@@ -62,10 +73,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 if !acc.contains(where: { $0.host == p.host }) { acc.append(p) }
             }
         }
+        clip.tcp.allowed = { [weak self] host in
+            guard let self else { return false }
+            return (self.link.peerHostsByDev() + self.discovery.hostsByDev).contains { $0.host == host }
+        }
         clip.blePeers = { [weak self] in
             (self?.ble.peerIds.filter { Date().timeIntervalSince($0.value.at) < 60 }.map { (dev: $0.key, id: $0.value.id) }) ?? []
         }
         clip.ble.freshId = { [weak self] dev in self?.ble.peerIds[dev]?.id }
+        clip.ble.secret = cfg.secret
+        clip.ble.selfName = cfg.deviceName
+        ble.onUnknownId = { [weak self] id, p in self?.clip.ble.lookupName(id: id, peripheral: p) }
         clip.onEvent = { [weak self] text in DispatchQueue.main.async { self?.state.clipStatus = text; self?.state.clipAt = Date() } }
         state.onClipSend = { [weak self] in self?.clip.sendNow() }
         state.onClipRecopy = { [weak self] r in self?.clip.recopy(r) }
@@ -215,9 +233,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if wantBle != ble.active {
             ble.setActive(wantBle)
             Log.write("transport: Bluetooth LE \(wantBle ? "on" : "off") (mode \(mode))")
-            if wantBle && !ble.supported { Log.write("transport: Bluetooth LE needs the device name mac, phone or tab") }
+            if wantBle && !ble.supported { Log.write("transport: the device name is not valid (lower case letters, digits and -, up to 20)") }
         }
-        if mode != "ble" { link.send(status) }
+        // Wi-Fi also runs when the handoff uses Bluetooth only but clipboard sync is on (images and long text always go
+        // over Wi-Fi): its packets tell the other devices this Mac's current address, as clips go to it directly. Their
+        // handoff ignores them in that mode.
+        let clipWifi = state.cfg.clipSync
+        if mode != "ble" || clipWifi { link.send(status) }
         if ble.active { ble.advertise(status) }
         // Which links actually bring news from other devices right now.
         let now = Date()
@@ -310,6 +332,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ears?.setGentle(state.cfg.gentleScan && owner && playing)
         // Speaker fallback first, so when a bud goes back in the sound is on the earbuds before the resume key is sent.
         speakerTick(playing: playing, reading: reading, owner: owner, inCall: inCall)
+        controller.onSpeaker = speaker.onSpeaker
         controller.tick(playing: playing, ear: reading, owner: owner, inCall: inCall)
         if state.phase != controller.phase { state.phase = controller.phase }
         if state.holdReason != controller.holdReason { state.holdReason = controller.holdReason }
@@ -419,7 +442,63 @@ if CommandLine.arguments.contains("--selftest") {
     let wire = Proto.encode(fresh, secret: "k")!
     check("roundtrip", Proto.decode(wire, secret: "k", nowMs: now)?.dev == "tab")
     check("wrong secret rejected", Proto.decode(wire, secret: "x", nowMs: now) == nil)
-    check("stale rejected", Proto.decode(wire, secret: "k", nowMs: now + 31000) == nil)
+    // v4: the sender's clock is not compared with this one when decoding; ClockGuard checks learned offsets.
+    check("v4 decodes with distant clocks", Proto.decode(wire, secret: "k", nowMs: now + 600_000)?.dev == "tab")
+    let cg = ClockGuard()
+    check("clock 10 min ahead learned", cg.check(dev: "p", senderMs: 601_000, nowMs: 1000, toleranceMs: ClockGuard.wifiTolerance, seq: 1)
+          && cg.check(dev: "p", senderMs: 602_000, nowMs: 2000, toleranceMs: ClockGuard.wifiTolerance, seq: 2))
+    check("2 minute old recording refused", !cg.check(dev: "p", senderMs: 482_000, nowMs: 2000, toleranceMs: ClockGuard.bleTolerance, seq: 1))
+    check("changed clock relearned after 3 rising copies",
+          !cg.check(dev: "p", senderMs: 900_000, nowMs: 3000, toleranceMs: ClockGuard.wifiTolerance, seq: 3)
+          && !cg.check(dev: "p", senderMs: 901_000, nowMs: 4000, toleranceMs: ClockGuard.wifiTolerance, seq: 4)
+          && cg.check(dev: "p", senderMs: 902_000, nowMs: 5000, toleranceMs: ClockGuard.wifiTolerance, seq: 5))
+    check("same copy replayed does not relearn",
+          !cg.check(dev: "p", senderMs: 100_000, nowMs: 6000, toleranceMs: ClockGuard.wifiTolerance, seq: 9)
+          && !cg.check(dev: "p", senderMs: 100_000, nowMs: 7000, toleranceMs: ClockGuard.wifiTolerance, seq: 9)
+          && !cg.check(dev: "p", senderMs: 100_000, nowMs: 8000, toleranceMs: ClockGuard.wifiTolerance, seq: 9))
+    check("clip fresh by sender clock", cg.fresh(dev: "p", senderMs: 905_000, nowMs: 6000, maxAgeMs: 300_000)
+          && !cg.fresh(dev: "p", senderMs: 500_000, nowMs: 6000, maxAgeMs: 300_000))
+    check("replay is not a restart", !PeerOrder.accept(lastSeq: 1000, seq: 5, ble: false, ts: 50_000, lastTs: 60_000).take
+          && PeerOrder.accept(lastSeq: 1000, seq: 5, ble: false, ts: 70_000, lastTs: 60_000).take)
+    check("v4 vectors", Proto.sign("test-secret", Proto.canonical(Status(dev: "mac", ts: 1700000000000, seq: 7, playing: true, ear: .both,
+          owner: false, call: true, prof: "buds", att: true), v: 4)) == "7ad20a1aac679b7fcd58e5e67214a1531812fdb6e574eeca406f31ef8af8cf0f"
+          && ["mac", "phone", "tab"].map { DeviceNames.id($0, secret: "test-secret") } == [33190, 36699, 48167])
+    let b4 = BlePayload.encode4(Status(dev: "mac", ts: 0, seq: 7, playing: true, ear: .both, owner: false, call: true, prof: "buds", att: true),
+                                secret: "test-secret", sec: 1_700_000_000)
+    check("v4 ble vector", b4.map { String(format: "%02x", $0) }.joined() == "eb81a60007f728611b1ffa426553f100")
+    let d4 = BlePayload.decode4(b4, secret: "test-secret")
+    check("v4 ble decode", d4.map { BlePayload.status($0, name: "mac") }.map { $0.att && $0.prof == "buds" && $0.ts == 1_700_000_000_000 } == true
+          && BlePayload.decode4(b4, secret: "x") == nil && BlePayload.decode4(Array(b4[0 ..< 15]) + [b4[15] ^ 1], secret: "test-secret") == nil)
+    // Out of the ears for 2 minutes lets go, except while speaker fallback plays the sound on the speakers.
+    func speakerRelease(_ onSpeaker: Bool, playFor: Double, limit: Double = 600) -> Double? {
+        var core = HandoffCore(settings: HandoffSettings(deviceName: "mac"))
+        var t = Date(timeIntervalSince1970: 1_000_000)
+        for _ in 0 ..< 20 {
+            _ = core.tick(HandoffInput(now: t, playing: false, ear: EarReading(ear: .both, source: "buds-rfcomm", confidence: .high), owner: true, inCall: false, peers: [], gate: nil))
+            t = t.addingTimeInterval(0.25)
+        }
+        let t0 = t
+        while t.timeIntervalSince(t0) < limit {
+            let el = t.timeIntervalSince(t0)
+            let acts = core.tick(HandoffInput(now: t, playing: el < playFor, ear: EarReading(ear: .none, source: "buds-rfcomm", confidence: .high),
+                                              owner: true, inCall: false, peers: [], gate: nil, onSpeaker: onSpeaker && el >= 2))
+            if acts.contains(where: { if case .release = $0 { return true }; return false }) { return el }
+            t = t.addingTimeInterval(0.25)
+        }
+        return nil
+    }
+    check("out 2 min lets go", speakerRelease(false, playFor: 0).map { (120 ... 122).contains($0) } == true)
+    check("playing on speakers keeps the earbuds", speakerRelease(true, playFor: 600, limit: 590) == nil)
+    let quietRel = speakerRelease(true, playFor: 300)
+    check("speakers quiet 2 min lets go \(quietRel.map { String($0) } ?? "never")", quietRel.map { (419 ... 422).contains($0) } == true)
+    let a0 = Date(timeIntervalSince1970: 0)
+    check("old addresses not used", Link.current(["old", "new"], ["old": a0, "new": a0.addingTimeInterval(3600)], now: a0.addingTimeInterval(3601)) == ["new"])
+    check("only the newest when none fresh", Link.current(["a", "b"], ["a": a0, "b": a0.addingTimeInterval(1)], now: a0.addingTimeInterval(9999)) == ["b"])
+    check("password-like text", PasswordLike.looks("Hunter2!xyz") && PasswordLike.looks("aB3dEf9hJ") && !PasswordLike.looks("hello world 123")
+          && !PasswordLike.looks("short1A") && !PasswordLike.looks("https://example.com/A1b2") && !PasswordLike.looks("Some.One42@example.com")
+          && !PasswordLike.looks("onlylowercaseletters"))
+    check("device names", DeviceNames.valid("phone2") && DeviceNames.valid("work-mac") && !DeviceNames.valid("Phone")
+          && !DeviceNames.valid("a b") && !DeviceNames.valid("-x") && !DeviceNames.valid(String(repeating: "a", count: 21)))
     check("tamper rejected", Proto.decode(String(data: wire, encoding: .utf8)!.replacingOccurrences(of: "\"playing\":0", with: "\"playing\":1").data(using: .utf8)!, secret: "k", nowMs: now) == nil)
 
     func beacon(_ status: UInt8) -> Data {
@@ -614,13 +693,13 @@ if CommandLine.arguments.contains("--selftest") {
     // Packet security: bad HMAC, stale and replayed packets.
     let sec = Proto.encode(Status(dev: "phone", ts: now, seq: 5, playing: true, ear: .both, owner: false), secret: "k")!
     check("bad hmac rejected", Proto.decode(sec, secret: "other", nowMs: now) == nil)
-    check("future packet rejected", Proto.decode(sec, secret: "k", nowMs: now - 31000) == nil)
+    check("v4 packet from a clock behind decodes", Proto.decode(sec, secret: "k", nowMs: now - 31000) != nil)
     let rc = Controller(cfg: Config(secret: "k"), blue: BlueUtil(path: "/none", address: ""))
     rc.receive(Status(dev: "phone", ts: now, seq: 5, playing: false, ear: .both, owner: false))
     rc.receive(Status(dev: "phone", ts: now - 500, seq: 4, playing: true, ear: .both, owner: false))
     check("older sequence ignored", rc.peerInfos().first?.playing == false)
     check("wrong secret is reported", Proto.rejection(sec, secret: "other", nowMs: now).map { $0.dev == "phone" && $0.reason == "secret" } == true)
-    check("clock skew is reported", Proto.rejection(sec, secret: "k", nowMs: now + 60000).map { $0.reason == "clock" } == true)
+    check("v4 clock never reported as wrong secret", Proto.decode(sec, secret: "k", nowMs: now + 60000) != nil)
     check("junk is not reported", Proto.rejection(Data("hello".utf8), secret: "k", nowMs: now) == nil)
 
     // Speaker fallback: a start with the earbuds out goes to the speakers, a bud back in returns it; nothing else moves.

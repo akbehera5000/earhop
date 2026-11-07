@@ -31,6 +31,10 @@ final class Controller {
 
     let core: HandoffCore
     private var peers: [String: Peer] = [:]
+    /// Set by the app before each tick: speaker fallback has the sound on the Mac's speakers.
+    var onSpeaker = false
+    /// When a device's copies were last refused because they were far off its clock offset (for the status page).
+    private(set) var clockRefused: [String: Date] = [:]
     private let lock = NSLock()
     private let actions = DispatchQueue(label: "earhop.actions")
     private var knownPeers = Set<String>()
@@ -62,9 +66,9 @@ final class Controller {
         s.cooldown = c.cooldownSeconds
         s.minPlay = max(c.debounceSeconds, c.minPlaySeconds)
         s.quiet = c.quietSeconds
-        // With speaker fallback the earbuds stay connected while they are out, so putting them back in is noticed and
-        // the sound can move back to them; otherwise this Mac lets go of them after releaseAfterOutSeconds out.
-        s.releaseAfterOut = c.speakerFallback ? 1e9 : c.releaseAfterOutSeconds
+        // Out of the ears for releaseAfterOutSeconds lets go of the earbuds, except while speaker fallback plays the sound
+        // on the speakers (HandoffInput.onSpeaker): then they stay so the sound can move back to them.
+        s.releaseAfterOut = c.releaseAfterOutSeconds
         s.resumeWithin = c.resumeWithinSeconds
         s.pauseWhenOneOut = c.pauseWhenOneOut
         s.safeModeAfter = c.safeModeAfterFailures
@@ -79,9 +83,18 @@ final class Controller {
     func receive(_ incoming: Status, via: String = "wifi") {
         lock.lock(); defer { lock.unlock() }
         let now = Date()
+        // v4 carries the sender's clock: refuse copies far off its learned offset (replayed recordings).
+        if incoming.v >= 4, !ClockGuard.shared.check(dev: incoming.dev, senderMs: incoming.ts, nowMs: Proto.nowMs(),
+                                                      toleranceMs: via == "ble" ? ClockGuard.bleTolerance : ClockGuard.wifiTolerance,
+                                                      seq: incoming.seq) {
+            clockRefused[incoming.dev] = now
+            return
+        }
         // The same status arrives over Bluetooth LE and Wi-Fi, often several times. Only a newer copy changes anything;
         // an older or repeated copy still shows the device is alive.
-        let order = PeerOrder.accept(lastSeq: peers[incoming.dev]?.status.seq, seq: incoming.seq, ble: via == "ble")
+        let prev = peers[incoming.dev]?.status
+        let order = PeerOrder.accept(lastSeq: prev?.seq, seq: incoming.seq, ble: via == "ble",
+                                     ts: incoming.v >= 4 ? incoming.ts : .max, lastTs: prev?.v ?? 0 >= 4 ? prev!.ts : .min)
         guard order.take else { peers[incoming.dev]?.seenAt = now; return }
         var s = incoming
         s.seq = order.seq
@@ -290,7 +303,7 @@ final class Controller {
         if autoOff { return }
 
         let input = HandoffInput(now: Date(), playing: playing, ear: ear, owner: owner, inCall: inCall,
-                                 peers: handoffPeers(), gate: autoGate())
+                                 peers: handoffPeers(), gate: autoGate(), onSpeaker: onSpeaker)
         let list = core.tick(input)
         if core.phase != lastPhase || !list.isEmpty {
             let acts = list.map { "\($0)" }.joined(separator: "; ")

@@ -32,6 +32,8 @@ class EarService : Service() {
     private var wake: android.os.PowerManager.WakeLock? = null
     private var wifiLock: android.net.wifi.WifiManager.WifiLock? = null
     private var netCallback: android.net.ConnectivityManager.NetworkCallback? = null
+    private var btReceiver: android.content.BroadcastReceiver? = null
+    private var lastStateLine = ""
     private val startedAt = System.currentTimeMillis()
     /** The active earbuds; both can change while running (see detectEarbuds). */
     @Volatile private var useBuds = false
@@ -100,13 +102,18 @@ class EarService : Service() {
         EhLog.w("service start dev=$name selftest=${Proto.selfTest()}")
 
         try {
-            link = UdpLink(this, 47474, secret, name) { s -> onPeer(s, "wifi") }
+            link = UdpLink(this, 47474, secret, name) { s -> NameBook.add(s.dev); onPeer(s, "wifi") }
             link?.start()
         } catch (e: Exception) {
             EhLog.w("wifi link failed: ${e.message}")
             link = null
         }
+        NameBook.setup(secret, p.getStringSet("knownDevices", emptySet()) ?: emptySet())
+        NameBook.onChange = { all ->
+            getSharedPreferences("earhop", MODE_PRIVATE).edit().putStringSet("knownDevices", all.filter { it !in setOf("mac", "phone", "tab") }.toSet()).apply()
+        }
         try { ble = BleLink(this, secret, name) { s -> onPeer(s, "ble") } } catch (e: Exception) { EhLog.w("ble init failed: ${e.message}") }
+        ble?.onUnknownId = { id, d -> ClipSync.lookupName(id, d) }
         try { openA2dp() } catch (e: Exception) { EhLog.w("a2dp failed: ${e.message}") }
         startEarbudParts()
 
@@ -128,6 +135,24 @@ class EarService : Service() {
         // Clipboard sync (Bluetooth LE and Wi-Fi).
         EhState.wifiPeers = { skip -> link?.peerHostsExcept(skip) ?: emptyList() }
         try { ClipSync.start(this) } catch (e: Exception) { EhLog.w("clip: start failed ${e.message}") }
+        ble?.onRecovered = { ClipSync.restartGatt() }
+
+        // When Android's Bluetooth is switched off and on (or its process restarts), every scan and the clipboard
+        // service registered before are gone and must be set up again; only advertising would come back by itself.
+        try {
+            val r = object : android.content.BroadcastReceiver() {
+                override fun onReceive(c: Context, i: Intent) {
+                    val st = i.getIntExtra(android.bluetooth.BluetoothAdapter.EXTRA_STATE, -1)
+                    if (st == android.bluetooth.BluetoothAdapter.STATE_ON) {
+                        EhLog.w("bluetooth: on again, setting up scans and the clipboard service")
+                        android.os.Handler(mainLooper).postDelayed({ if (running) recoverBluetooth() }, 1500)
+                    } else if (st == android.bluetooth.BluetoothAdapter.STATE_OFF) EhLog.w("bluetooth: off")
+                }
+            }
+            val f = android.content.IntentFilter(android.bluetooth.BluetoothAdapter.ACTION_STATE_CHANGED)
+            if (Build.VERSION.SDK_INT >= 33) registerReceiver(r, f, Context.RECEIVER_EXPORTED) else registerReceiver(r, f)
+            btReceiver = r
+        } catch (e: Exception) { EhLog.w("bluetooth: state receiver failed ${e.message}") }
 
         // Log network changes: a switch of Wi-Fi network or a lost connection explains peers going quiet.
         try {
@@ -178,13 +203,18 @@ class EarService : Service() {
                         val st = Status(name, now, seq, shown, ear, owner, call, if (useBuds) "buds" else "airpods")
                         sendStatus(st)
                     }
+                    controller?.onSpeaker = speaker.onSpeaker
                     controller?.tick(playing, reading, owner, call, EhState.peers.values, AppRules.preferredPlaying(this))
                     speakerTick(playing, reading, owner, call)
                     if (now - lastEarbudCheck >= 2000) { lastEarbudCheck = now; detectEarbuds() }
                     updateNotification()
-                    if (now - lastLogAt >= 5000) {
+                    // Only when it changes (and once every 10 minutes): a line every 5 s used up the log quota on phones
+                    // that rate limit app logs, and the lines that matter were dropped.
+                    val stateLine = "state: playing=$playing ear=$ear owner=$owner call=$call"
+                    if (stateLine != lastStateLine || now - lastLogAt >= 600_000) {
+                        lastStateLine = stateLine
                         lastLogAt = now
-                        EhLog.w("state: playing=$playing ear=$ear owner=$owner call=$call")
+                        EhLog.w(stateLine)
                     }
                 } catch (e: Exception) {
                     EhLog.w("loop error: ${e.javaClass.simpleName} ${e.message}")
@@ -228,6 +258,13 @@ class EarService : Service() {
     }
 
     /** Starts the parts that belong to the active earbuds: the Galaxy Buds channel, or the AirPods scanner and channel. */
+    /** Sets up everything that registers with Android's Bluetooth again, after it came back on. */
+    private fun recoverBluetooth() {
+        try { ble?.restart("Bluetooth came back") } catch (e: Exception) { EhLog.w("ble restart failed: ${e.message}") }
+        if (ble?.active != true) ClipSync.restartGatt() // otherwise ble.onRecovered did it
+        ears?.let { e -> try { e.stop(); e.start() } catch (x: Exception) { EhLog.w("ear: restart failed ${x.message}") } }
+    }
+
     private fun startEarbudParts() {
         if (useBuds) {
             try { buds = BudsClient(this, { Earbuds.filter(this) }) { isOwner(filter) }.also { it.start() } } catch (e: Exception) { EhLog.w("buds init failed: ${e.message}") }
@@ -295,7 +332,9 @@ class EarService : Service() {
             EhLog.w("transport: Bluetooth LE ${if (wantBle) "on" else "off"} (mode $mode)" +
                 if (wantBle && !b.supported) ", needs the device name mac, phone or tab" else "")
         }
-        if (mode != "ble") link?.send(st)
+        // Wi-Fi also runs when the handoff uses Bluetooth only but clipboard sync is on: its packets tell the other
+        // devices this one's current address (clips go to it directly). Their handoff ignores them in that mode.
+        if (mode != "ble" || clipNeedsWifi()) link?.send(st)
         if (b != null && b.active) try { b.advertise(st) } catch (e: Exception) { EhLog.w("ble advertise failed: ${e.message}") }
         // Which links actually bring news from other devices right now.
         val now = System.currentTimeMillis()
@@ -312,18 +351,30 @@ class EarService : Service() {
         if (label != EhState.transport) { EhLog.w("transport: $label"); EhState.transport = label }
     }
 
+    /** Images and long text always travel over Wi-Fi, so the clipboard needs current Wi-Fi addresses whenever it is on. */
+    private fun clipNeedsWifi(): Boolean = getSharedPreferences("earhop", MODE_PRIVATE).getBoolean("clipSync", true)
+
     @Synchronized
     private fun onPeer(s: Status, via: String) {
+        // "Bluetooth" only: Wi-Fi packets (sent for the clipboard) only tell addresses, they do not count for the handoff.
+        if (via == "wifi" && getSharedPreferences("earhop", MODE_PRIVATE).getString("transport", "both") == "ble") return
         val now = System.currentTimeMillis()
+        // v4 carries the sender's clock: refuse copies far off its learned offset (replayed recordings).
+        if (s.v >= 4 && !ClockGuard.shared.check(s.dev, s.ts, now,
+                if (via == "ble") ClockGuard.BLE_TOLERANCE else ClockGuard.WIFI_TOLERANCE, s.seq)) {
+            EhState.clockRefused[s.dev] = now
+            return
+        }
         val prev = EhState.peers[s.dev]
         // The same status arrives over Bluetooth LE and Wi-Fi, often several times. Only a newer copy changes anything;
         // an older or repeated copy still shows the device is alive.
-        val (take, fullSeq) = PeerOrder.accept(prev?.seq, s.seq, via == "ble")
+        val (take, fullSeq) = PeerOrder.accept(prev?.seq, s.seq, via == "ble",
+            if (s.v >= 4) s.ts else Long.MAX_VALUE, if ((prev?.v ?: 0) >= 4) prev!!.ts else Long.MIN_VALUE)
         if (!take) { if (prev != null) EhState.peers[s.dev] = prev.copy(seenAt = now); return }
         val since = if (!s.playing) 0L else (prev?.playingSince?.takeIf { it != 0L } ?: now)
         val last = if (s.playing) now else (prev?.lastPlayingAt ?: 0L)
         val old = EhState.peers.put(s.dev, PeerState(s.dev, s.playing, s.ear, s.owner, s.call, via, now, since, last, fullSeq, s.ts,
-            s.prof.ifEmpty { prev?.prof ?: "" }))
+            s.prof.ifEmpty { prev?.prof ?: "" }, s.v, s.att))
         if (old == null || old.playing != s.playing || old.ear != s.ear || old.owner != s.owner || old.call != s.call) {
             EhLog.w("peer ${s.dev} ($via): playing=${s.playing} ear=${s.ear} owner=${s.owner} call=${s.call}")
         }
@@ -401,6 +452,7 @@ class EarService : Service() {
         try { ears?.stop() } catch (e: Exception) { }
         try { ble?.setActive(false) } catch (e: Exception) { }
         try { link?.stop() } catch (e: Exception) { }
+        try { btReceiver?.let { unregisterReceiver(it) } } catch (e: Exception) { }
         try { netCallback?.let { (getSystemService(Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager).unregisterNetworkCallback(it) } } catch (e: Exception) { }
         EhState.controller = null
         try { ClipSync.stop(this) } catch (e: Exception) { }

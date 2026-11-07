@@ -18,7 +18,13 @@ object EhLog {
     private val writer = java.util.concurrent.Executors.newSingleThreadExecutor()
 
     /** Called once from the Application, before anything logs. */
-    fun init(ctx: android.content.Context) { file = java.io.File(ctx.filesDir, "earhop.log") }
+    fun init(ctx: android.content.Context) {
+        file = java.io.File(ctx.filesDir, "earhop.log")
+        // A copy in EarHop's own folder in shared storage, readable from a computer without root:
+        // adb shell cat /sdcard/Android/data/com.earhop.logger/files/earhop.log
+        mirror = try { ctx.getExternalFilesDir(null)?.let { java.io.File(it, "earhop.log") } } catch (e: Exception) { null }
+    }
+    @Volatile private var mirror: java.io.File? = null
 
     @Synchronized
     fun w(msg: String) {
@@ -31,6 +37,7 @@ object EhLog {
                 try {
                     if (f.length() > 1_000_000) { val old = java.io.File(f.path + ".1"); old.delete(); f.renameTo(old) }
                     f.appendText(line + "\n")
+                    mirror?.let { m -> if (m.length() > 1_000_000) m.writeText(""); m.appendText(line + "\n") }
                 } catch (e: Exception) { }
             }
         }
@@ -59,6 +66,10 @@ data class PeerState(
     val seq: Int = 0, val ts: Long = 0L,
     /** The earbuds that device uses ("airpods", "buds", "" unknown), used to follow the owner's pair automatically. */
     val prof: String = "",
+    /** Protocol version of the copy taken; with v4, ts is the sender's own clock. */
+    val v: Int = 4,
+    /** v4: the user was active on that device within the last 30 s. */
+    val att: Boolean = false,
 )
 
 data class Switch(val at: Long, val kind: String, val reason: String)
@@ -107,4 +118,6 @@ object EhState {
         while (history.size > 30) history.removeAt(history.size - 1)
     }
     val peers = java.util.concurrent.ConcurrentHashMap<String, PeerState>()
+    /** When a device's copies were last refused for being far off its clock offset (for the status page). */
+    val clockRefused = java.util.concurrent.ConcurrentHashMap<String, Long>()
 }

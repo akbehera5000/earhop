@@ -66,10 +66,13 @@ All tests at once: `bash tests/run.sh`.
    Accessibility when macOS asks. Accessibility is shown as *Device Control and Data Access* on newer macOS.
 2. **Pair Android:** on the Mac open Settings, Network, and scan the QR code with the phone camera. EarHop opens with the
    shared secret filled in. Or copy the secret and use **Paste secret**.
-3. **Name each device** `mac`, `phone` or `tab`. These exact names are required for the Bluetooth LE link.
-4. **Android permissions:** Nearby devices, Location (Android needs it for Bluetooth scans), Location switched on,
+3. **Name each device.** Any name works (lower case letters, digits and `-`, up to 20), for example `mac`, `phone`,
+   `tab` or `phone2`, but every device needs its own. All devices must run EarHop 1.3 or later.
+4. **Accept the pairing request** the first time two devices send a clip over Bluetooth. It appears once per pair of
+   devices; after that, Bluetooth sends work at the first attempt.
+5. **Android permissions:** Nearby devices, Location (Android needs it for Bluetooth scans), Location switched on,
    Notifications, and Battery set to *No restrictions* (essential on some phones). Notification access and root are optional.
-5. Press **Start** on Android and turn on **Live** on the Mac (off is a dry run that only logs decisions).
+6. Press **Start** on Android and turn on **Live** on the Mac (off is a dry run that only logs decisions).
 
 ## Permissions explained
 
@@ -120,7 +123,7 @@ Both apps write the same kinds of log lines. Mac: `~/.earhop/earhop.log` or **Co
 
 Common problems:
 
-* **Peers never appear:** the router may isolate Wi-Fi clients. Bluetooth LE runs alongside Wi-Fi all the time (switch it in the popover Connection card or Settings, Connection), so devices in Bluetooth range still find each other; device names must be `mac`, `phone`, `tab`.
+* **Peers never appear:** the router may isolate Wi-Fi clients. Bluetooth LE runs alongside Wi-Fi all the time (switch it in the popover Connection card or Settings, Connection), so devices in Bluetooth range still find each other. Every device needs its own name and EarHop 1.3 or later.
 * **Android stops after a while:** set battery to No restrictions and allow autostart (some phones need it).
 * **Galaxy Buds move by themselves:** turn off Quick Connect (Mac Settings, Buds) so Samsung's own switching does not fight EarHop.
 * **Buds status says refused:** Galaxy Wearable may hold the status channel. EarHop backs off (2 s up to 60 s) and switching still works without it.

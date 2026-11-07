@@ -144,6 +144,8 @@ class MainActivity : Activity() {
     private val quickTiles = ArrayList<() -> Unit>()
     // dashboard
     private lateinit var hero: LinearLayout
+    /** Landscape: the earbuds card sits fixed in this left column; the pages scroll on the right. */
+    private var side: LinearLayout? = null
     private var heroHue: Glass.Hue? = null
     private lateinit var heroBuds: BudsView
     private lateinit var heroUnit: TextView
@@ -205,25 +207,56 @@ class MainActivity : Activity() {
         val nav = buildNav()
         frame.addView(nav, FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
             Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL))
+        // Landscape (phone and tablet): two columns. Left: the earbuds card with Take and Release, fixed (it scrolls on
+        // its own only if it does not fit). Right: the page, its header and the tab bar. Portrait keeps one column.
+        val landscape = resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE
+        var sideScroll: ScrollView? = null
+        val top: View = if (!landscape) frame else {
+            frame.background = null
+            val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_VERTICAL }
+            side = col
+            sideScroll = ScrollView(this).apply {
+                isFillViewport = true; overScrollMode = View.OVER_SCROLL_NEVER; isVerticalScrollBarEnabled = false; addView(col)
+            }
+            LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL; background = g.page()
+                addView(sideScroll, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 0.42f))
+                addView(frame, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 0.58f))
+            }
+        }
         @Suppress("DEPRECATION")
-        frame.setOnApplyWindowInsetsListener { _, ins ->
-            content.setPadding(dp(16), dp(16) + ins.systemWindowInsetTop, dp(16), dp(120) + ins.systemWindowInsetBottom)
-            (nav.layoutParams as FrameLayout.LayoutParams).bottomMargin = dp(14) + ins.systemWindowInsetBottom
+        top.setOnApplyWindowInsetsListener { _, ins ->
+            val l = ins.systemWindowInsetLeft; val r = ins.systemWindowInsetRight
+            if (landscape) {
+                side?.setPadding(dp(16) + l, dp(12) + ins.systemWindowInsetTop, dp(6), dp(12) + ins.systemWindowInsetBottom)
+                content.setPadding(dp(10), dp(8) + ins.systemWindowInsetTop, dp(16) + r, dp(110) + ins.systemWindowInsetBottom)
+            } else content.setPadding(dp(16) + l, dp(16) + ins.systemWindowInsetTop, dp(16) + r, dp(120) + ins.systemWindowInsetBottom)
+            (nav.layoutParams as FrameLayout.LayoutParams).bottomMargin = dp(if (landscape) 10 else 14) + ins.systemWindowInsetBottom
             header.layoutParams = (header.layoutParams as FrameLayout.LayoutParams).apply { height = dp(44) + ins.systemWindowInsetTop }
             nav.requestLayout()
             ins
         }
-        setContentView(frame)
+        setContentView(top)
         frame.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> blurSoon() }
         root = pages.getValue("Home")
         build()
+        side?.let { col ->
+            // Only the card moves; Take and Release stay at the top of Home on the right, so the card fits a phone's
+            // short landscape screen without scrolling.
+            (hero.parent as? ViewGroup)?.removeView(hero)
+            col.addView(hero, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+            hero.minimumHeight = 0
+            hero.setPadding(dp(18), dp(12), dp(18), dp(14))
+            (heroState.layoutParams as? LinearLayout.LayoutParams)?.topMargin = dp(8)
+            heroBuds.heightDp = 184f
+        }
         handleScan(intent?.data?.toString())
         showPage(prefs.getString("page", "Home") ?: "Home")
     }
 
     // ---------- building blocks ----------
 
-    private fun text(s: String, size: Float, color: Int, bold: Boolean = false) = TextView(this).apply {
+    private fun text(s: String, size: Float, color: Int, bold: Boolean = false): TextView = QuietText(this).apply {
         text = s; textSize = size; setTextColor(color)
         if (bold) typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
         setLineSpacing(0f, 1.08f)
@@ -544,6 +577,8 @@ class MainActivity : Activity() {
     }
 
     private fun paintSeg(bar: LinearLayout, options: List<Pair<String, String>>, value: String) {
+        if (bar.tag == value) return // unchanged: repainting every second kept the screen from ever settling
+        bar.tag = value
         for (i in options.indices) {
             val cell = bar.getChildAt(i) as? TextView ?: continue
             val on = options[i].first == value
@@ -554,7 +589,7 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun button(label: String, filled: Boolean, onClick: () -> Unit) = Button(this).apply {
+    private fun button(label: String, filled: Boolean, onClick: () -> Unit): Button = QuietButton(this).apply {
         text = label
         isAllCaps = false
         textSize = 15.5f
@@ -801,6 +836,8 @@ class MainActivity : Activity() {
         divider(clip)
         switchRow(clip, "Include images", "Images always go over Wi-Fi",
             { prefs.getBoolean("clipImages", true) }) { prefs.edit().putBoolean("clipImages", it).apply() }
+        switchRow(clip, "Skip password-like text", "Copies that look like a password (one word, 8 to 64 characters, mixed kinds) are not sent automatically. Off: they sync like any text.",
+            { ClipSync.skipPasswords(this) }) { prefs.edit().putBoolean("clipSkipPasswords", it).apply() }
         clipText = text("", 13f, subC).apply { setPadding(dp(2), dp(10), 0, 0) }
         clip.addView(clipText)
         clip.addView(button("Share clipboard now", true) { startActivity(Intent(this, ClipActivity::class.java)) }, lp(12))
@@ -832,7 +869,7 @@ class MainActivity : Activity() {
 
         val sendTo = card("Send to")
         val self = prefs.getString("name", "phone") ?: "phone"
-        val others = listOf("mac", "phone", "tab").filter { it != self }
+        val others = NameBook.all.filter { it != self }
         others.forEachIndexed { i, dev ->
             if (i > 0) divider(sendTo)
             switchRow(sendTo, pretty(dev), null, { dev !in ClipSync.excluded(this) }) { on ->
@@ -864,7 +901,7 @@ class MainActivity : Activity() {
         linkText = text("", 13f, subC).apply { setPadding(dp(2), dp(8), 0, 0) }
         conn.addView(linkText)
 
-        val setup = card("This device", "Each device needs its own name: mac, phone or tab. The secret comes from the Mac (Settings, Network).")
+        val setup = card("This device", "Each device needs its own name, for example phone, tab or phone2 (lower case letters, digits and -, up to 20). The secret comes from the Mac (Settings, Network).")
         val pairedSecret = intent?.data?.takeIf { it.scheme == "earhop" }?.getQueryParameter("secret")
         // Tablets default to "tab" so a phone and a tablet never share the default name.
         val defaultName = if (resources.configuration.smallestScreenWidthDp >= 600) "tab" else "phone"
@@ -1069,7 +1106,8 @@ class MainActivity : Activity() {
         }
         heroState.text = word
         // The outline says whether the earbuds are here: green yes, red-grey no.
-        heroState.background = g.statePill(run && EhState.owner).also { (it as GradientDrawable).setColor(0x24FFFFFF) }
+        val heroOn = run && EhState.owner
+        if (heroState.tag != heroOn) { heroState.tag = heroOn; heroState.background = g.statePill(heroOn).also { (it as GradientDrawable).setColor(0x24FFFFFF) } }
 
         // The picture: both earbuds and the case with their batteries, and where each bud is. Galaxy Buds report every
         // bud and the case over their channel; AirPods give the wear state and the two buds' levels.
@@ -1118,13 +1156,16 @@ class MainActivity : Activity() {
         // Wrong secret, clock and duplicate names are on the Needs attention card; here only the switching state.
         val failure = EhState.lastFailure
         val hold = EhState.holdReason
-        heroNote.visibility = View.VISIBLE
-        when {
-            !run -> heroNote.visibility = View.GONE
-            failure != null && !switching -> heroNote.text = "Last switch failed: $failure."
-            hold != null && !EhState.owner && !switching -> heroNote.text = "Not switching: $hold."
-            else -> heroNote.visibility = View.GONE
+        // Decided once: setting a view visible and then hidden again in one refresh counts as a change every second.
+        val note = when {
+            !run -> null
+            failure != null && !switching -> "Last switch failed: $failure."
+            hold != null && !EhState.owner && !switching -> "Not switching: $hold."
+            else -> null
         }
+        if (note != null) heroNote.text = note
+        val noteVis = if (note != null) View.VISIBLE else View.GONE
+        if (heroNote.visibility != noteVis) heroNote.visibility = noteVis
         safeBtn.visibility = if (run && EhState.safeMode) View.VISIBLE else View.GONE
 
         // Wear state and batteries are in the picture now, so the chips stay hidden.
@@ -1162,6 +1203,9 @@ class MainActivity : Activity() {
         if (bt != null && !bt.isEnabled) list += Issue("Bluetooth is off.", red, "Turn on") { tryOpen(Intent(Settings.ACTION_BLUETOOTH_SETTINGS)) }
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
         if (!pm.isIgnoringBatteryOptimizations(packageName)) list += Issue("Android may stop EarHop in the background.", orange, "No battery limits") { askBattery() }
+        // Android 13 and later hide a running service's notification (with Take, Release, noise and battery) until
+        // EarHop may post notifications. That is separate from notification access, which only reads other apps.
+        if (!notificationsAllowed()) list += Issue("EarHop's notification controls are hidden: notifications are not allowed for EarHop.", orange, "Allow") { askNotifications() }
         EhState.duplicates.entries.firstOrNull { now - it.value < 180000 }?.key?.let { dup ->
             list += Issue("Two devices are both named $dup, so EarHop mixes them up. Give each its own name.", red, "Fix name") { showPage("Devices") }
         }
@@ -1219,7 +1263,10 @@ class MainActivity : Activity() {
     }
 
     private fun refreshStrip(run: Boolean) {
-        val names = listOf("mac", "phone", "tab")
+        // The devices seen recently, else mac, phone and tab, without this one.
+        val self = prefs.getString("name", "phone") ?: "phone"
+        val seen = EhState.peers.keys.sorted()
+        val names = (listOf("mac", "phone", "tab") + seen).distinct().filter { it == self || it in seen || it in listOf("mac", "phone", "tab") }.take(4)
         val states = names.map { deviceState(it, run) }
         val sig = states.joinToString { it.first }
         if (sig == stripSig) return
@@ -1951,9 +1998,7 @@ class MainActivity : Activity() {
         val bt = (getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager).adapter
         list += Check("Bluetooth switched on", "", bt?.isEnabled == true) { startActivity(Intent(Settings.ACTION_BLUETOOTH_SETTINGS)) }
         if (Build.VERSION.SDK_INT >= 33) {
-            list += Check("Notifications", "Shows that EarHop is running", granted(Manifest.permission.POST_NOTIFICATIONS)) {
-                ask(listOf(Manifest.permission.POST_NOTIFICATIONS))
-            }
+            list += Check("Notifications", "Shows Take, Release, noise and battery in the notification", notificationsAllowed()) { askNotifications() }
         }
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
         list += Check("Run in background", "Battery: No restrictions (needed on some phones)", pm.isIgnoringBatteryOptimizations(packageName)) {
@@ -2004,6 +2049,29 @@ class MainActivity : Activity() {
         }
         prefs.edit().putStringSet("asked", asked + perms).apply()
         requestPermissions(perms.toTypedArray(), 1)
+    }
+
+    /** Notifications allowed: the Android 13 permission where it exists, and not switched off for the app. */
+    private fun notificationsAllowed(): Boolean {
+        val nm = getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
+        val perm = Build.VERSION.SDK_INT < 33 || granted(Manifest.permission.POST_NOTIFICATIONS)
+        return perm && nm.areNotificationsEnabled()
+    }
+
+    /**
+     * Asks Android once; after a refusal Android shows no dialog any more, so EarHop opens its own notification
+     * settings page instead (Allow notifications is the switch at the top).
+     */
+    private fun askNotifications() {
+        val asked = prefs.getStringSet("asked", emptySet()) ?: emptySet()
+        val perm = Manifest.permission.POST_NOTIFICATIONS
+        if (Build.VERSION.SDK_INT >= 33 && !granted(perm) && (perm !in asked || shouldShowRequestPermissionRationale(perm))) {
+            prefs.edit().putStringSet("asked", asked + perm).apply()
+            requestPermissions(arrayOf(perm), 2)
+            return
+        }
+        Toast.makeText(this, "Turn on Allow notifications for EarHop", Toast.LENGTH_LONG).show()
+        tryOpen(Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(Settings.EXTRA_APP_PACKAGE, packageName))
     }
 
     private fun openAppSettings() {
@@ -2090,7 +2158,7 @@ class MainActivity : Activity() {
         val n = nameField.text.toString().trim()
         val s = secretField.text.toString().trim()
         if (n == prefs.getString("name", "") && s == prefs.getString("secret", "")) { Toast.makeText(this, "Nothing changed", Toast.LENGTH_SHORT).show(); return }
-        if (n.isEmpty() || n.contains("|") || s.isEmpty()) { Toast.makeText(this, "Enter a name without | and the secret", Toast.LENGTH_LONG).show(); return }
+        if (!DeviceNames.valid(n) || s.isEmpty()) { Toast.makeText(this, "Use a name of lower case letters, digits and - (up to 20), and enter the secret", Toast.LENGTH_LONG).show(); return }
         stopService(Intent(this, EarService::class.java))
         Toast.makeText(this, "Restarting EarHop with the new settings", Toast.LENGTH_SHORT).show()
         handler.postDelayed({ if (!EhState.running) toggle() }, 800)
@@ -2103,7 +2171,7 @@ class MainActivity : Activity() {
             return
         }
         val n = nameField.text.toString().trim()
-        if (n.isEmpty() || n.contains("|")) { Toast.makeText(this, "Enter a device name without |", Toast.LENGTH_LONG).show(); showPage("Devices"); return }
+        if (!DeviceNames.valid(n)) { Toast.makeText(this, "Use a device name of lower case letters, digits and - (up to 20)", Toast.LENGTH_LONG).show(); showPage("Devices"); return }
         if (secretField.text.isNullOrBlank()) { Toast.makeText(this, "Enter the shared secret from the Mac", Toast.LENGTH_LONG).show(); showPage("Devices"); return }
         if (!required()) {
             Toast.makeText(this, "Allow the permissions first", Toast.LENGTH_LONG).show()
@@ -2155,7 +2223,8 @@ class MainActivity : Activity() {
 
     private val tick = object : Runnable {
         override fun run() {
-            try { refresh(); blurSoon() } catch (e: Exception) { EhLog.w("ui refresh ${e.message}") }
+            // Redraw the frosted bar and header only when something on the page really changed.
+            try { refresh(); if (Quiet.changed) { Quiet.changed = false; blurSoon() } } catch (e: Exception) { EhLog.w("ui refresh ${e.message}") }
             handler.postDelayed(this, 1000)
         }
     }
@@ -2176,7 +2245,7 @@ class MainActivity : Activity() {
     private fun refresh() {
         val run = EhState.running
         statusChip.text = if (run) "Running" else "Stopped"
-        statusChip.background = g.statePill(run)
+        if (statusChip.tag != run) { statusChip.tag = run; statusChip.background = g.statePill(run) }
         if (techText.isShown) techText.text = technical()
         startBtn.text = if (run) "Save" else "Start"
 

@@ -135,3 +135,60 @@ object ClipChunks {
         }
     }
 }
+
+/**
+ * Text that looks like a password: one word (no spaces or line breaks), 8 to 64 characters, with at least 3 of lower
+ * case letters, upper case letters, digits and symbols. Links and email addresses never count. Used only when the
+ * owner switches on "Skip password-like text" (off by default). Same rule as PasswordLike in Clipboard.swift.
+ */
+object PasswordLike {
+    private val email = Regex("^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$")
+    fun looks(t: String): Boolean {
+        if (t.length !in 8..64 || t.any { it.isWhitespace() }) return false
+        val low = t.lowercase()
+        if ("://" in t || low.startsWith("www.") || email.matches(t)) return false
+        val kinds = listOf(t.any { it.isLowerCase() }, t.any { it.isUpperCase() }, t.any { it.isDigit() },
+            t.any { !it.isLetterOrDigit() }).count { it }
+        return kinds >= 3
+    }
+}
+
+/**
+ * Whether an automatic send must be skipped because the clip is EarHop's own: one that just arrived from another
+ * device and was put on this clipboard. Android shows its clipboard preview for that too, which the copy triggers take
+ * for a new copy, and without this the clip would bounce straight back. Manual sends are never skipped. Pure, tested.
+ */
+object EchoGuard {
+    fun skip(auto: Boolean, label: String?, now: Long, ownWriteAt: Long, hash: Int?, lastReceivedHash: Int, lastSentHash: Int): Boolean {
+        if (!auto) return false
+        if (label?.startsWith("EarHop") == true) return true
+        if (now - ownWriteAt < 3000) return true
+        return hash != null && (hash == lastReceivedHash || hash == lastSentHash)
+    }
+}
+
+/**
+ * Where each device can be reached on Wi-Fi: the addresses its signed packets came from, with when each was last heard.
+ * [current] gives the addresses heard within 10 minutes, newest first, or else only the newest one, so clips never go
+ * to networks the device left long ago. At most 4 addresses per device are kept. Pure, unit tested.
+ */
+class AddressBook<A : Any> {
+    private val map = java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.ConcurrentHashMap<A, Long>>()
+
+    /** Records [dev] heard at [addr]; true when the address is new for it. */
+    fun learn(dev: String, addr: A, now: Long): Boolean {
+        val m = map.getOrPut(dev) { java.util.concurrent.ConcurrentHashMap() }
+        val isNew = m.put(addr, now) == null
+        while (m.size > 4) m.entries.minByOrNull { it.value }?.let { m.remove(it.key) }
+        return isNew
+    }
+
+    fun current(dev: String, now: Long): List<A> {
+        val m = map[dev] ?: return emptyList()
+        val sorted = m.entries.sortedByDescending { it.value }
+        val fresh = sorted.filter { now - it.value < 600_000 }.map { it.key }
+        return fresh.ifEmpty { sorted.take(1).map { it.key } }
+    }
+
+    val devices: Set<String> get() = map.keys.toSet()
+}

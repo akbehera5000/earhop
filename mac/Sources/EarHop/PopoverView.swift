@@ -393,7 +393,7 @@ struct PopoverView: View {
 /// Friendly names and symbols for the protocol device names.
 enum DeviceName {
     static func pretty(_ n: String) -> String {
-        switch n { case "mac": return "Mac"; case "phone": return "Phone"; case "tab": return "Tablet"; default: return n }
+        switch n { case "mac": return "Mac"; case "phone": return "Phone"; case "tab": return "Tablet"; default: return n.prefix(1).uppercased() + n.dropFirst() }
     }
     static func symbol(_ n: String) -> String {
         switch n { case "phone": return "iphone"; case "tab": return "ipad.landscape"; default: return "laptopcomputer" }

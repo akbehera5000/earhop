@@ -42,6 +42,9 @@ import java.util.concurrent.Executors
 /** Wi-Fi: a direct TCP connection to the peer, port 47475, one length prefixed frame per connection. */
 class ClipTcp(private val port: Int = PORT, private val onFrame: (ByteArray) -> Unit) {
     companion object { const val PORT = 47475; const val MAX_FRAME = 16 * 1024 * 1024 }
+    /** Whether a connecting address belongs to one of the user's devices. */
+    @Volatile var allowed: (java.net.InetAddress) -> Boolean = { true }
+    private val open = java.util.concurrent.atomic.AtomicInteger(0)
     @Volatile private var server: ServerSocket? = null
     private val pool = Executors.newCachedThreadPool()
 
@@ -52,7 +55,11 @@ class ClipTcp(private val port: Int = PORT, private val onFrame: (ByteArray) -> 
                 server = s
                 while (!s.isClosed) {
                     val c = try { s.accept() } catch (e: Exception) { break }
-                    pool.execute { serve(c) }
+                    // Only the user's devices (addresses learned from a signed status in the last 10 minutes), at most
+                    // 4 at a time: anything else on the network is closed at once and cannot tie the listener up.
+                    if (!allowed(c.inetAddress) || open.get() >= 4) { try { c.close() } catch (e: Exception) { }; continue }
+                    open.incrementAndGet()
+                    pool.execute { try { serve(c) } finally { open.decrementAndGet() } }
                 }
             } catch (e: Exception) { EhLog.w("clip: Wi-Fi listener not started: ${e.message}") }
         }, "earhop-clip-tcp").start()
@@ -60,9 +67,10 @@ class ClipTcp(private val port: Int = PORT, private val onFrame: (ByteArray) -> 
 
     private fun serve(c: Socket) {
         try {
-            c.soTimeout = 30_000
+            c.soTimeout = 10_000 // the length must arrive within 10 s
             val inp = DataInputStream(c.getInputStream())
             val len = inp.readInt()
+            c.soTimeout = 30_000
             if (len in 1..MAX_FRAME) { val b = ByteArray(len); inp.readFully(b); onFrame(b) }
         } catch (e: Exception) { } finally { try { c.close() } catch (e: Exception) { } }
     }
@@ -88,20 +96,47 @@ class ClipTcp(private val port: Int = PORT, private val onFrame: (ByteArray) -> 
  * moment, writes the chunks and disconnects. Peers are known from their status advertisements (EhState.bleDevices).
  */
 @SuppressLint("MissingPermission")
-class ClipGatt(private val ctx: Context, private val onFrame: (ByteArray) -> Unit) {
+class ClipGatt(private val ctx: Context, private val selfName: String, private val secret: String, private val onFrame: (ByteArray) -> Unit) {
     companion object {
         val SERVICE: UUID = UUID.fromString("eac1b000-5eed-4c1e-8a00-000000000001")
         val INBOX: UUID = UUID.fromString("eac1b001-5eed-4c1e-8a00-000000000001")
+        /** Read: this device's name (v4 advertisements carry only an id). */
+        val NAME: UUID = UUID.fromString("eac1b002-5eed-4c1e-8a00-000000000001")
         const val MAX_FRAME = 64 * 1024
     }
-    private var server: BluetoothGattServer? = null
+    @Volatile private var server: BluetoothGattServer? = null
+    /** True once Android confirmed the clipboard service was added (for the status page). */
+    @Volatile var serviceUp = false
+        private set
+    private val lookedUp = java.util.concurrent.ConcurrentHashMap<Int, Long>()
     private val assembler = ClipChunks.Assembler()
     private val worker = Executors.newSingleThreadExecutor()
 
+    /**
+     * Opens the clipboard service, closing any earlier one first. Called again after Android's Bluetooth restarts:
+     * the old server disappears with it, and other devices then find no clipboard service here.
+     */
+    @Synchronized
     fun start() {
+        try { server?.close() } catch (e: Exception) { }
+        server = null
+        serviceUp = false
         try {
             val bm = ctx.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
+            if (bm.adapter?.isEnabled != true) { EhLog.w("clip: Bluetooth is off, the clipboard service opens when it is back"); return }
             val s = bm.openGattServer(ctx, object : BluetoothGattServerCallback() {
+                override fun onServiceAdded(status: Int, service: BluetoothGattService) {
+                    if (status != BluetoothGatt.GATT_SUCCESS) EhLog.w("clip: Bluetooth clipboard service not added (status $status)")
+                    else serviceUp = true
+                }
+                override fun onCharacteristicReadRequest(device: BluetoothDevice, requestId: Int, offset: Int, ch: BluetoothGattCharacteristic) {
+                    val v = selfName.toByteArray(Charsets.UTF_8)
+                    val ok = ch.uuid == NAME && offset <= v.size
+                    try {
+                        server?.sendResponse(device, requestId, if (ok) BluetoothGatt.GATT_SUCCESS else BluetoothGatt.GATT_INVALID_OFFSET, offset,
+                            if (ok) v.copyOfRange(offset, v.size) else null)
+                    } catch (e: Exception) { }
+                }
                 override fun onCharacteristicWriteRequest(device: BluetoothDevice, requestId: Int, ch: BluetoothGattCharacteristic,
                                                           prepared: Boolean, responseNeeded: Boolean, offset: Int, value: ByteArray?) {
                     if (responseNeeded) try { server?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null) } catch (e: Exception) { }
@@ -109,11 +144,15 @@ class ClipGatt(private val ctx: Context, private val onFrame: (ByteArray) -> Uni
                 }
             }) ?: run { EhLog.w("clip: Bluetooth server not available"); return }
             val svc = BluetoothGattService(SERVICE, BluetoothGattService.SERVICE_TYPE_PRIMARY)
+            // Both need an encrypted link: the first connection between two devices asks once to pair them. Paired devices
+            // recognise each other's changing Bluetooth addresses, so a send never goes to an address that is gone.
             svc.addCharacteristic(BluetoothGattCharacteristic(INBOX,
                 BluetoothGattCharacteristic.PROPERTY_WRITE or BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE,
-                BluetoothGattCharacteristic.PERMISSION_WRITE))
-            s.addService(svc)
+                BluetoothGattCharacteristic.PERMISSION_WRITE_ENCRYPTED))
+            svc.addCharacteristic(BluetoothGattCharacteristic(NAME, BluetoothGattCharacteristic.PROPERTY_READ,
+                BluetoothGattCharacteristic.PERMISSION_READ_ENCRYPTED))
             server = s
+            if (!s.addService(svc)) EhLog.w("clip: Bluetooth clipboard service could not be added")
         } catch (e: Exception) { EhLog.w("clip: Bluetooth server failed: ${e.message}") }
     }
 
@@ -121,7 +160,9 @@ class ClipGatt(private val ctx: Context, private val onFrame: (ByteArray) -> Uni
     fun send(frame: ByteArray, devices: List<Pair<String, BluetoothDevice>>) {
         if (frame.size > MAX_FRAME) return
         val tag = java.util.Random().nextInt()
-        for ((name, d) in devices) worker.execute {
+        for ((name, d0) in devices) worker.execute {
+            // The address may have changed while earlier sends ran (some devices take a new one every minute).
+            val d = EhState.bleDevices[name]?.first ?: d0
             if (!sendTo(frame, tag, name, d)) {
                 // One retry with the device's newest address: some Android devices change it whenever they restart advertising.
                 val fresh = EhState.bleDevices[name]?.first
@@ -137,6 +178,7 @@ class ClipGatt(private val ctx: Context, private val onFrame: (ByteArray) -> Uni
     private fun sendTo(frame: ByteArray, tag: Int, name: String, device: BluetoothDevice): Boolean {
         var stage = "connecting"
         val done = java.util.concurrent.CountDownLatch(1)
+        val connected = java.util.concurrent.CountDownLatch(1)
         var ok = false
         val chunks = ClipChunks.split(frame, 172, tag)
         var next = 0
@@ -145,28 +187,69 @@ class ClipGatt(private val ctx: Context, private val onFrame: (ByteArray) -> Uni
             fun writeNext(g: BluetoothGatt) {
                 val ch = g.getService(SERVICE)?.getCharacteristic(INBOX) ?: run { done.countDown(); return }
                 if (next >= chunks.size) { ok = true; done.countDown(); return }
-                stage = "writing"
+                stage = "writing (accept the pairing request if one appears)"
                 ch.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
                 ch.value = chunks[next]
                 if (!g.writeCharacteristic(ch)) done.countDown()
             }
             override fun onConnectionStateChange(g: BluetoothGatt, status: Int, state: Int) {
-                if (state == BluetoothProfile.STATE_CONNECTED) { stage = "setting up"; g.requestMtu(185) } else done.countDown()
+                if (state == BluetoothProfile.STATE_CONNECTED) { connected.countDown(); stage = "setting up"; g.requestMtu(185) } else done.countDown()
             }
             override fun onMtuChanged(g: BluetoothGatt, mtu: Int, status: Int) { stage = "finding the clipboard service"; g.discoverServices() }
             override fun onServicesDiscovered(g: BluetoothGatt, status: Int) { writeNext(g) }
             override fun onCharacteristicWrite(g: BluetoothGatt, ch: BluetoothGattCharacteristic, status: Int) {
-                if (status != BluetoothGatt.GATT_SUCCESS) { done.countDown(); return }
+                if (status != BluetoothGatt.GATT_SUCCESS) {
+                    if (status == 5 || status == 15) stage = "pairing: accept the pairing request on both devices"
+                    done.countDown(); return
+                }
                 next++; writeNext(g)
             }
         }
         try {
             gatt = device.connectGatt(ctx, false, cb, BluetoothDevice.TRANSPORT_LE)
-            done.await(8, java.util.concurrent.TimeUnit.SECONDS)
+            // 6 s to connect, then 30 s for the rest: enough to accept the one-time pairing request.
+            if (connected.await(6, java.util.concurrent.TimeUnit.SECONDS)) done.await(30, java.util.concurrent.TimeUnit.SECONDS)
         } catch (e: Exception) { }
         try { gatt?.disconnect(); gatt?.close() } catch (e: Exception) { }
         EhLog.w("clip: Bluetooth send to $name ${if (ok) "done" else "failed while $stage"}")
         return ok
+    }
+
+    /** Reads the name of the device behind an unknown Bluetooth LE id, once a minute at most per id. */
+    @Suppress("DEPRECATION")
+    fun lookupName(id: Int, device: BluetoothDevice) {
+        val now = System.currentTimeMillis()
+        if (now - (lookedUp[id] ?: 0L) < 60_000) return
+        lookedUp[id] = now
+        worker.execute {
+            val done = java.util.concurrent.CountDownLatch(1)
+            val connected = java.util.concurrent.CountDownLatch(1)
+            var name: String? = null
+            val cb = object : BluetoothGattCallback() {
+                override fun onConnectionStateChange(g: BluetoothGatt, status: Int, state: Int) {
+                    if (state == BluetoothProfile.STATE_CONNECTED) { connected.countDown(); g.discoverServices() } else done.countDown()
+                }
+                override fun onServicesDiscovered(g: BluetoothGatt, status: Int) {
+                    val ch = g.getService(SERVICE)?.getCharacteristic(NAME)
+                    if (ch == null || !g.readCharacteristic(ch)) done.countDown()
+                }
+                override fun onCharacteristicRead(g: BluetoothGatt, ch: BluetoothGattCharacteristic, status: Int) {
+                    if (status == BluetoothGatt.GATT_SUCCESS) name = ch.value?.toString(Charsets.UTF_8)
+                    done.countDown()
+                }
+            }
+            var gatt: BluetoothGatt? = null
+            try {
+                gatt = device.connectGatt(ctx, false, cb, BluetoothDevice.TRANSPORT_LE)
+                if (connected.await(6, java.util.concurrent.TimeUnit.SECONDS)) done.await(30, java.util.concurrent.TimeUnit.SECONDS)
+            } catch (e: Exception) { }
+            try { gatt?.disconnect(); gatt?.close() } catch (e: Exception) { }
+            val n = name
+            // Only a name that really belongs to this id (by the shared secret) is learned.
+            if (n != null && DeviceNames.valid(n) && DeviceNames.id(n, secret) == id) {
+                if (NameBook.add(n)) EhLog.w("ble: learned the device name $n")
+            } else EhLog.w("ble: could not read the name of device id ${"%04x".format(id)}")
+        }
     }
 
     fun stop() { try { server?.close() } catch (e: Exception) { }; worker.shutdownNow() }
@@ -231,6 +314,8 @@ object ClipSync {
     fun method(ctx: Context) = prefs(ctx).getString("clipTransport", "both") ?: "both"
     /** Devices this one does not send clips to. */
     fun excluded(ctx: Context): Set<String> = prefs(ctx).getStringSet("clipExclude", emptySet()) ?: emptySet()
+    /** Skip password-like text in automatic sends. Off by default: such text is synced. */
+    fun skipPasswords(ctx: Context) = prefs(ctx).getBoolean("clipSkipPasswords", false)
 
     private fun event(text: String) { lastEvent = text; lastEventAt = System.currentTimeMillis() }
 
@@ -257,8 +342,12 @@ object ClipSync {
 
     fun start(ctx: Context) {
         val app = ctx.applicationContext
-        tcp = ClipTcp { f -> receive(app, f, "Wi-Fi") }.also { it.start() }
-        gatt = ClipGatt(app) { f -> receive(app, f, "Bluetooth") }.also { it.start() }
+        tcp = ClipTcp { f -> receive(app, f, "Wi-Fi") }.also {
+            it.allowed = { a -> a in EhState.wifiPeers(emptySet()) }
+            it.start()
+        }
+        val p0 = prefs(app)
+        gatt = ClipGatt(app, p0.getString("name", "phone") ?: "phone", p0.getString("secret", "") ?: "") { f -> receive(app, f, "Bluetooth") }.also { it.start() }
         main.post {
             val cm = app.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
             listener?.let { try { cm.removePrimaryClipChangedListener(it) } catch (e: Exception) { } }
@@ -471,6 +560,14 @@ object ClipSync {
         } catch (e: Exception) { EhLog.w("clip: could not open the send screen: ${e.message}") }
     }
 
+    /** Reads an unknown device's name over its Bluetooth clipboard service. */
+    fun lookupName(id: Int, device: BluetoothDevice) { gatt?.lookupName(id, device) }
+    /** Whether the Bluetooth clipboard service is registered (status page). */
+    val gattUp: Boolean get() = gatt?.serviceUp == true
+
+    /** Opens the Bluetooth clipboard service again (after Android's Bluetooth came back). */
+    fun restartGatt() { gatt?.let { g -> Thread { g.start() }.start() } }
+
     fun stop(ctx: Context) {
         recent.clear()
         main.removeCallbacks(helperWatch)
@@ -484,6 +581,9 @@ object ClipSync {
         if (clip.itemCount == 0) return "The clipboard is empty"
         if (auto && paused(ctx)) return "Clipboard sync is paused"
         val desc = clip.description
+        // Automatic sends never pass on what EarHop itself just put on the clipboard (a clip that arrived): Android shows
+        // its clipboard preview for that too, which the copy triggers take for a new copy, and it would bounce back.
+        if (EchoGuard.skip(auto, desc.label?.toString(), System.currentTimeMillis(), ownWriteAt, null, lastReceivedHash, lastSentHash)) return "Already synced"
         // Android 13 and later: apps mark passwords and similar as sensitive. Never send those.
         if (Build.VERSION.SDK_INT >= 33 && desc.extras?.getBoolean(ClipDescription.EXTRA_IS_SENSITIVE) == true) {
             EhLog.w("clip: skipped a sensitive item"); return "Not sent: marked as sensitive"
@@ -495,13 +595,18 @@ object ClipSync {
             val bytes = try { ctx.contentResolver.openInputStream(uri)?.use { it.readBytes() } } catch (e: Exception) { null }
                 ?: return "Could not read the image"
             if (bytes.size > MAX_IMAGE) return "Image too large (${bytes.size / 1024} KB)"
+            if (EchoGuard.skip(auto, null, 0, Long.MIN_VALUE / 2, bytes.contentHashCode(), lastReceivedHash, lastSentHash)) return "Already synced"
             return send(ctx, "image", ctx.contentResolver.getType(uri) ?: "image/png", bytes)
         }
         val text = item.coerceToText(ctx)?.toString() ?: return "Nothing to send"
         if (text.isEmpty()) return "The clipboard is empty"
         val b = text.toByteArray()
         // Automatic sends skip what just arrived from another device or was already sent.
-        if (auto && (b.contentHashCode() == lastReceivedHash || b.contentHashCode() == lastSentHash)) return "Already synced"
+        if (EchoGuard.skip(auto, null, 0, Long.MIN_VALUE / 2, b.contentHashCode(), lastReceivedHash, lastSentHash)) return "Already synced"
+        if (auto && skipPasswords(ctx) && PasswordLike.looks(text)) {
+            EhLog.w("clip: skipped text that looks like a password (Skip password-like text is on)")
+            return "Not sent: looks like a password"
+        }
         if (b.size > MAX_TEXT) return "Text too large"
         return send(ctx, "text", "text/plain", b)
     }
@@ -552,7 +657,8 @@ object ClipSync {
         val p = prefs(ctx)
         val item = ClipCodec.decode(frame, p.getString("secret", "") ?: "") ?: return
         if (item.dev == p.getString("name", "phone")) return
-        if (Math.abs(System.currentTimeMillis() - item.ts) > ClipCodec.MAX_AGE_MS || known(item.id)) return
+        // Within 5 minutes by the sender's own clock (its offset is learned from its status), so clocks may differ.
+        if (!ClockGuard.shared.fresh(item.dev, item.ts, System.currentTimeMillis(), ClipCodec.MAX_AGE_MS) || known(item.id)) return
         remember(item.id)
         main.post { apply(ctx, item, via) }
     }

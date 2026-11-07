@@ -27,26 +27,15 @@ class ClipAccessibilityService : AccessibilityService() {
             return listed && Settings.Secure.getInt(ctx.contentResolver, Settings.Secure.ACCESSIBILITY_ENABLED, 0) == 1
         }
 
-        /** Whether Android's accessibility manager itself counts the service as enabled (its live list, not the saved string). */
-        fun systemEnabled(ctx: Context): Boolean {
-            val am = ctx.getSystemService(Context.ACCESSIBILITY_SERVICE) as? android.view.accessibility.AccessibilityManager ?: return false
-            return try {
-                am.getEnabledAccessibilityServiceList(android.accessibilityservice.AccessibilityServiceInfo.FEEDBACK_ALL_MASK).any {
-                    val s = it.resolveInfo?.serviceInfo
-                    s != null && s.packageName == ctx.packageName && s.name == ClipAccessibilityService::class.java.name
-                }
-            } catch (e: Exception) { false }
-        }
-
         /**
-         * "on" only when all three agree: switched on in Settings, enabled in Android's live list, and connected to EarHop.
-         * "listed" when switched on but Android has not (yet) started it, "off" otherwise. A stale `connected` flag or a
-         * leftover settings string alone never shows On.
+         * "on" when switched on in Settings and Android started it in this process (connected), "listed" when switched on
+         * but not started, "off" otherwise. A leftover settings string alone never shows On (after a crash the new process
+         * is not connected). Android's live list is not required: some phones leave a running service out of it.
          */
         fun state(ctx: Context): String {
             val on = switchedOn(ctx)
             return when {
-                on && systemEnabled(ctx) && connected -> "on"
+                on && connected -> "on"
                 on -> "listed"
                 else -> "off"
             }

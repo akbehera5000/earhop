@@ -21,9 +21,10 @@ class UdpLink(
     private var lock: WifiManager.MulticastLock? = null
     @Volatile private var running = false
     @Volatile var lastHeard = 0L
-    private val unicast = java.util.concurrent.CopyOnWriteArrayList<InetAddress>()
-    /** Addresses learned from packets that passed the signature check, so peers are reached even when broadcasts are dropped. */
-    private val learned = java.util.concurrent.ConcurrentHashMap<String, MutableList<InetAddress>>()
+    /** Addresses of the other devices, from signed packets and Bonjour (NSD), with when each was last heard. */
+    private val book = AddressBook<InetAddress>()
+    private fun learn(dev: String, addr: InetAddress, now: Long) = book.learn(dev, addr, now)
+    private fun current(dev: String, now: Long = System.currentTimeMillis()) = book.current(dev, now)
     private val lastFrom = java.util.concurrent.ConcurrentHashMap<String, Triple<InetAddress, Int, Long>>()
     private val duplicateAt = java.util.concurrent.ConcurrentHashMap<String, Long>()
 
@@ -73,8 +74,8 @@ class UdpLink(
             override fun onResolveFailed(i: NsdServiceInfo, e: Int) { done() }
             override fun onServiceResolved(i: NsdServiceInfo) {
                 val h = i.host
-                if (h != null && h !is java.net.Inet6Address && !unicast.contains(h)) {
-                    unicast.add(h)
+                if (h != null && h !is java.net.Inet6Address && i.serviceName != selfName &&
+                    learn(i.serviceName, h, System.currentTimeMillis())) {
                     EhLog.w("discovery: found ${i.serviceName} at ${h.hostAddress}")
                 }
                 done()
@@ -115,8 +116,7 @@ class UdpLink(
                         val from = p.address
                         val now = System.currentTimeMillis()
                         if (from != null) {
-                            val list = learned.getOrPut(st.dev) { java.util.concurrent.CopyOnWriteArrayList() }
-                            if (from !in list) { list.add(from); if (list.size > 4) list.removeAt(0); EhLog.w("link: ${st.dev} is at ${from.hostAddress}") }
+                            if (learn(st.dev, from, now)) EhLog.w("link: ${st.dev} is at ${from.hostAddress}")
                             // One device sends rising sequence numbers from every address it uses.
                             val last = lastFrom[st.dev]
                             if (last != null && last.first != from && st.seq + 3 < last.second && now - last.third < 10000) reportDuplicate(st.dev)
@@ -153,20 +153,35 @@ class UdpLink(
         return InetAddress.getByAddress(bytes)
     }
 
-    /** Addresses of the other devices, learned from their signed packets. */
-    fun peerHosts(): List<InetAddress> = (learned.values.flatten() + unicast).distinct()
+    /** Where the other devices can be reached now (see [current]). */
+    fun peerHosts(): List<InetAddress> = book.devices.flatMap { current(it) }.distinct()
 
     /** The same, leaving out the devices in [skip] (for the clipboard's Send to setting). */
-    fun peerHostsExcept(skip: Set<String>): List<InetAddress> {
-        if (skip.isEmpty()) return peerHosts()
-        val skipped = learned.filterKeys { it in skip }.values.flatten().toSet()
-        return (learned.filterKeys { it !in skip }.values.flatten() + unicast.filter { it !in skipped }).distinct()
+    fun peerHostsExcept(skip: Set<String>): List<InetAddress> =
+        book.devices.filter { it !in skip && it != selfName }.flatMap { current(it) }.distinct()
+
+    /**
+     * Broadcast addresses of every network this device is on, Wi-Fi and its own hotspot alike. The phone's hotspot has
+     * no Wi-Fi client address, so the Wi-Fi manager's broadcast address misses it.
+     */
+    private fun interfaceBroadcasts(): List<InetAddress> {
+        val now = System.currentTimeMillis()
+        if (now - broadcastsAt < 10_000) return broadcasts
+        broadcastsAt = now
+        broadcasts = try {
+            java.net.NetworkInterface.getNetworkInterfaces().toList()
+                .filter { it.isUp && !it.isLoopback }
+                .flatMap { it.interfaceAddresses.mapNotNull { a -> a.broadcast } }
+        } catch (e: Exception) { emptyList() }
+        return broadcasts
     }
+    @Volatile private var broadcasts: List<InetAddress> = emptyList()
+    @Volatile private var broadcastsAt = 0L
 
     fun send(st: Status) {
         val s = socket ?: return
         val data = Proto.encode(st, secret)
-        val targets = (listOfNotNull(subnetBroadcast(), InetAddress.getByName("255.255.255.255")) + unicast + learned.values.flatten()).distinct()
+        val targets = (listOfNotNull(subnetBroadcast(), InetAddress.getByName("255.255.255.255")) + interfaceBroadcasts() + peerHosts()).distinct()
         for (t in targets) {
             try {
                 s.send(DatagramPacket(data, data.size, t, port))

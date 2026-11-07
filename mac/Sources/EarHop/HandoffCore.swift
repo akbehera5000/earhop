@@ -82,6 +82,8 @@ struct HandoffInput {
     var peers: [HandoffPeer]
     /// Why automatic claims are held right now (quiet hours, wrong Wi-Fi), or nil.
     var gate: String?
+    /// Speaker fallback has the sound on this device's own speakers while the earbuds are out.
+    var onSpeaker: Bool = false
 }
 
 /// Pause and resume on ear removal, the same rules as Android's EarPolicy. Only trusted readings count.
@@ -365,7 +367,10 @@ final class HandoffCore {
             } else {
                 out += startClaim("playing here", manual: false, now)
             }
-        } else if i.owner, cooled, pending == nil, let eo = earOutSince, now.timeIntervalSince(eo) >= settings.releaseAfterOut {
+        } else if i.owner, cooled, pending == nil, let eo = earOutSince, now.timeIntervalSince(eo) >= settings.releaseAfterOut,
+                  // While the sound plays on the speakers (speaker fallback) the earbuds stay, so it can move back to
+                  // them; once that has been quiet as long, they are let go as usual.
+                  !i.onSpeaker || now.timeIntervalSince(lastLocalPlayingAt) >= settings.releaseAfterOut {
             out += startRelease("out of ears", now)
         } else if i.owner, cooled, pending == nil, i.playing, let mine = playingSince,
                   let taker = fresh.first(where: { p in

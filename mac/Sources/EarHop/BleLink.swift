@@ -25,7 +25,10 @@ final class BleLink: NSObject, CBPeripheralManagerDelegate {
         manager = CBPeripheralManager(delegate: self, queue: .main)
     }
 
-    var supported: Bool { BlePayload.devCodes[selfName] != nil }
+    /// Any valid name works since v4 (the advertisement carries an id derived from it).
+    var supported: Bool { DeviceNames.valid(selfName) }
+    /// A valid v4 advertisement from an id whose name is not known yet, and where it came from (looked up once).
+    var onUnknownId: ((Int, UUID) -> Void)?
 
     func peripheralManagerDidUpdateState(_ p: CBPeripheralManager) {
         Log.write("ble: peripheral state \(p.state.rawValue)")
@@ -47,8 +50,8 @@ final class BleLink: NSObject, CBPeripheralManagerDelegate {
         guard active, supported, manager.state == .poweredOn else { return }
         var st = s
         st.seq = s.seq & 0xFFFF
-        guard let probe = BlePayload.encode(st, secret: secret) else { return }
-        let key = [probe[1], probe[4]]
+        let probe = BlePayload.encode4(st, secret: secret, sec: UInt32(Proto.nowMs() / 1000))
+        let key = [probe[1], probe[2], probe[5]]
         let quiet = Date().timeIntervalSince(max(lastPeerAt, activatedAt)) > 60
         if quiet != lowPower { lowPower = quiet; Log.write("ble: \(quiet ? "no device heard for a minute, low power" : "device heard, normal rate")") }
         if key == lastFlagsKey && Date().timeIntervalSince(lastAdvertAt) < (lowPower ? 30 : 5) { return }
@@ -69,16 +72,24 @@ final class BleLink: NSObject, CBPeripheralManagerDelegate {
         guard active else { return }
         for u in uuids {
             let b = [UInt8](u.data)
-            guard b.count == 16, b[0] == 0xEA,
-                  let m = BlePayload.decode(b, secret: secret), m.dev != selfName else { continue }
+            guard b.count == 16 else { continue }
+            let st: Status
+            if b[0] == 0xEB, let m = BlePayload.decode4(b, secret: secret) {
+                guard let name = NameBook.shared.name(for: m.id) else { onUnknownId?(m.id, peripheral); continue }
+                st = BlePayload.status(m, name: name)
+            } else if b[0] == 0xEA, let m = BlePayload.decode(b, secret: secret) {
+                // A device still on the old format (before 1.3): fixed names, checked against this clock.
+                st = Status(dev: m.dev, ts: Proto.nowMs(), seq: m.seq, playing: m.playing, ear: m.ear, owner: m.owner,
+                            call: m.call, prof: m.prof, v: 3)
+            } else { continue }
+            guard st.dev != selfName else { continue }
             lastPeerAt = Date()
-            peerIds[m.dev] = (peripheral, Date())
+            peerIds[st.dev] = (peripheral, Date())
             // The scan reports the same advertisement many times a second. Pass on a new one at once, a repeat every 0.5 s
             // (the controller decides which copy is newest and treats repeats as "still here").
-            if let last = lastForward[m.dev], last.seq == m.seq, Date().timeIntervalSince(last.at) < 0.5 { continue }
-            lastForward[m.dev] = (m.seq, Date())
-            onStatus?(Status(dev: m.dev, ts: Proto.nowMs(), seq: m.seq, playing: m.playing,
-                             ear: m.ear, owner: m.owner, call: m.call, prof: m.prof))
+            if let last = lastForward[st.dev], last.seq == st.seq, Date().timeIntervalSince(last.at) < 0.5 { continue }
+            lastForward[st.dev] = (st.seq, Date())
+            onStatus?(st)
         }
     }
 }

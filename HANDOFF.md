@@ -209,6 +209,40 @@ Mac with Buds: if the channel is not open, ear is assumed `both`. The channel cl
     install needs an uninstall, which erases the settings: export first. Checked on the emulator (every page, dark and
     light, release APK, no crash); not yet on the phone or tablet, and the dot-matrix battery has not been seen with
     real earbuds.
+* **2026-11-08, clipboard sync failed on every method (1.2.5).** Three separate faults, found with adb on both Android
+    devices and the Mac log. (1) Bluetooth: the phone's Bluetooth had been switched off and on two days after EarHop
+    started. That removes every app's scan and GATT server registration for good, while EarHop's advertisement came
+    back on its next minute restart. So the Mac and tablet still heard the phone (switching kept working), but the phone
+    heard nobody ("No other devices seen yet") and the Mac found "no clipboard service" on it. Seen in
+    `dumpsys bluetooth_manager --print`: no EarHop scanner and no EarHop GATT server. Fix: `EarService` listens for
+    `BluetoothAdapter.ACTION_STATE_CHANGED` and on STATE_ON calls `recoverBluetooth()` (BleLink.restart with fresh
+    scanner and advertiser objects, ClipGatt reopened, AirPods scan restarted); `BleLink` also has `onScanFailed` and a
+    watchdog that sets everything up again when nobody was heard for 2 minutes. Tested by switching the tablet's
+    Bluetooth off and on: the link and clipboard service were back in 2 s and clips went both ways over Bluetooth.
+    Keep the one minute advertisement restart: the BLE payload's signed minute stamp is refused after 2 minutes.
+    (2) Wi-Fi: addresses are learned only from Wi-Fi status packets, and with the switching link on "Bluetooth" none were
+    sent, so clips went to four old addresses from other networks. Now Wi-Fi status packets also go out whenever
+    clipboard sync is on (images and long text always use Wi-Fi); in "Bluetooth" mode the receivers only learn the
+    address from them and do not feed them to the handoff. Learned addresses carry the time last heard; clips go to
+    addresses heard within 10 minutes (else only the newest). Android broadcasts on every interface too (the phone was
+    the hotspot, where the Wi-Fi manager's broadcast address is empty). (3) Echo: a received image put on the phone's
+    clipboard made Android show its clipboard preview, the accessibility trigger took it for a copy and sent the image
+    back. Automatic sends now skip clips labelled EarHop, anything within 3 s of EarHop's own write, and images equal to
+    the last received or sent one. Also: Bluetooth sends look up the newest Bluetooth identifier just before connecting
+    (Android takes a new address on each minute restart); the Mac logs what services it found when the clipboard
+    service is missing; the accessibility card shows On when the service is connected (some phones leave it out of
+    `getEnabledAccessibilityServiceList`). Tested on the Mac, phone and tablet: text in all six directions over
+    Bluetooth only, Wi-Fi only and Both, images from the Mac to both and from the phone over Wi-Fi. Not tested by hand:
+    a real copy in another app on the phone (the automatic trigger), and the watchdog after a Bluetooth process crash.
+* **2026-11-08, stage 1 of the owner's fix list (1.3.0).** Protocol v4 (AGENTS.md section 6): free names with a 16 bit
+    HMAC id on Bluetooth LE and a name book; sender clocks with per-device learned offsets (ClockGuard) instead of a
+    30 s window; restarts only taken with a newer sender clock (replay). Bluetooth clipboard characteristics need
+    encryption, so devices pair once; verified that the first send to the phone then works every time. Findings:
+    (a) the tablet never settled because MainActivity re-set texts each second, toggled heroNote visible then gone in
+    one refresh, and repainted segmented controls; measured with gfxinfo and `uiautomator events`. (b) the phone's
+    notification was posted but hidden: POST_NOTIFICATIONS was not granted (notification access was). (c) the phone's
+    `persist.log.ratelimit=1` dropped EarHop's lines because of a state line every 5 s. Speaker fallback hold is now a
+    core rule (`HandoffInput.onSpeaker`) with tests on both platforms. Watchdog backoff is `BleWatchdog`.
 
 ## 8. What is built (feature list)
 

@@ -167,7 +167,7 @@ struct ClipboardPage: View {
     @ObservedObject var state: AppState
     private var mode: ClipMode { ClipMode(rawValue: state.cfg.clipTransport) ?? .both }
     private var others: [String] {
-        var names = ["phone", "tab"]
+        var names = NameBook.shared.all
         for p in state.peers where !names.contains(p.name) && p.name != state.cfg.deviceName { names.append(p.name) }
         return names.filter { $0 != state.cfg.deviceName }
     }
@@ -198,8 +198,9 @@ struct ClipboardPage: View {
                 Toggle("Receive clips from other devices", isOn: $state.cfg.clipReceive)
                 Toggle("Include images (Wi-Fi)", isOn: $state.cfg.clipImages)
                 Toggle("Notify me when a clip arrives", isOn: $state.cfg.clipNotify)
+                Toggle("Skip password-like text", isOn: $state.cfg.clipSkipPasswords)
             } header: { Text("Behaviour") } footer: {
-                Text("With automatic sending off, use Send now in the menu bar popover.")
+                Text("With automatic sending off, use Send now in the menu bar popover. Skip password-like text keeps copies that look like a password (one word, 8 to 64 characters, mixed kinds, never links or email addresses) on this Mac; off, they sync like any text. Items a password manager marks as concealed are never sent.")
             }
             .disabled(!state.cfg.clipSync)
             Section {

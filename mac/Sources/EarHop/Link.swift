@@ -15,6 +15,8 @@ final class Link {
     private(set) var lastHeard = Date.distantPast
     /// Addresses learned from packets that passed the signature check, so peers are reached even when broadcasts are dropped.
     private var learned: [String: [Data]] = [:]
+    /// When each learned address (device + address) was last heard from, so old addresses from other networks drop out.
+    private var heardAt: [String: [Data: Date]] = [:]
     /// Per device: the address and sequence number of its last packet, to spot two devices using one name.
     private var lastFrom: [String: (addr: Data, seq: Int, at: Date)] = [:]
     private var duplicateAt: [String: Date] = [:]
@@ -73,8 +75,14 @@ final class Link {
                     self.learnedLock.lock()
                     var known = self.learned[s.dev] ?? []
                     let isNew = !known.contains(addr)
-                    if isNew { known.append(addr); if known.count > 4 { known.removeFirst() } }
+                    // Newest last; the oldest of more than 4 is dropped.
+                    known.removeAll { $0 == addr }
+                    known.append(addr)
+                    if known.count > 4 { known.removeFirst() }
                     self.learned[s.dev] = known
+                    var times = self.heardAt[s.dev] ?? [:]
+                    times[addr] = now
+                    self.heardAt[s.dev] = times.filter { known.contains($0.key) }
                     // One device sends rising sequence numbers, from every address it uses. Numbers that jump back
                     // while the address changes mean a second device with the same name.
                     var duplicate = false
@@ -138,10 +146,22 @@ final class Link {
         }.reduce(into: [String]()) { if !$0.contains($1) { $0.append($1) } }
     }
 
-    /// The same addresses with the device each one belongs to.
+    /// Where each device can be reached now: addresses heard within 10 minutes, newest first, or else only the newest
+    /// one. Old addresses from networks the device left are not used for clipboard sends.
     func peerHostsByDev() -> [(dev: String, host: String)] {
         learnedLock.lock(); defer { learnedLock.unlock() }
-        return learned.flatMap { dev, list in list.compactMap { Discovery.ip($0).map { (dev: dev, host: $0) } } }
+        let now = Date()
+        return learned.flatMap { dev, list -> [(dev: String, host: String)] in
+            Link.current(list, heardAt[dev] ?? [:], now: now).compactMap { Discovery.ip($0).map { (dev: dev, host: $0) } }
+        }
+    }
+
+    /// Addresses heard within 10 minutes, newest first, or else only the newest one (`newestLast` is in learning
+    /// order). Same rule as AddressBook in ClipCodec.kt. Pure, tested by the self test.
+    static func current<A: Hashable>(_ newestLast: [A], _ times: [A: Date], now: Date) -> [A] {
+        let newestFirst = newestLast.sorted { (times[$0] ?? .distantPast) > (times[$1] ?? .distantPast) }
+        let fresh = newestFirst.filter { now.timeIntervalSince(times[$0] ?? .distantPast) < 600 }
+        return fresh.isEmpty ? Array(newestFirst.prefix(1)) : fresh
     }
 
     func send(_ s: Status) {

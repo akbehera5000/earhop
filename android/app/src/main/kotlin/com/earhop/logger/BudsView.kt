@@ -46,8 +46,12 @@ class BudsView(ctx: Context, private val density: Float) : View(ctx) {
     private val pos = Array(2) { floatArrayOf(Float.NaN, 0f, 1f, 1f) }
     private val start = System.currentTimeMillis()
 
+    /** Height of the picture; a little lower in landscape, where a phone's screen is short. */
+    var heightDp = 206f
+        set(v) { if (v != field) { field = v; requestLayout() } }
+
     override fun onMeasure(w: Int, h: Int) {
-        setMeasuredDimension(MeasureSpec.getSize(w), dp(206f).toInt())
+        setMeasuredDimension(MeasureSpec.getSize(w), dp(heightDp).toInt())
     }
 
     override fun onDraw(c: Canvas) {

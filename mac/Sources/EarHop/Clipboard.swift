@@ -8,7 +8,20 @@ import Network
 // recognised by its id and ignored); images go over Wi-Fi only. Every clip is encrypted with AES-256-GCM using a key
 // derived from the shared secret, so neither link carries readable data.
 
-/// One clipboard item travelling between devices.
+/// Text that looks like a password: one word, 8 to 64 characters, at least 3 of lower case, upper case, digits and
+/// symbols; links and email addresses never count. Used only when "Skip password-like text" is on (off by default).
+/// Same rule as PasswordLike in ClipCodec.kt.
+enum PasswordLike {
+    static func looks(_ t: String) -> Bool {
+        guard (8 ... 64).contains(t.count), !t.contains(where: { $0.isWhitespace }) else { return false }
+        if t.contains("://") || t.lowercased().hasPrefix("www.") { return false }
+        if t.range(of: "^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$", options: .regularExpression) != nil { return false }
+        let kinds = [t.contains { $0.isLowercase }, t.contains { $0.isUppercase }, t.contains { $0.isNumber },
+                     t.contains { !$0.isLetter && !$0.isNumber }].filter { $0 }.count
+        return kinds >= 3
+    }
+}
+
 /// One clip in the popover's recent list.
 struct ClipRecent: Identifiable {
     let id = UUID()
@@ -129,9 +142,30 @@ final class ClipTcp {
         } catch { Log.write("clip: Wi-Fi listener not started: \(error)") }
     }
 
+    /// Whether a connecting address belongs to one of the user's devices (learned from a signed status in the last 10
+    /// minutes). Anything else on the network is closed at once, so it cannot tie the listener up with junk.
+    var allowed: (String) -> Bool = { _ in true }
+    private var open = 0
+    static let maxOpen = 4
+
     private func serve(_ c: NWConnection) {
+        var host = ""
+        if case .hostPort(let h, _) = c.endpoint {
+            host = "\(h)".components(separatedBy: "%").first ?? ""
+            if host.hasPrefix("::ffff:") { host = String(host.dropFirst(7)) } // an IPv4 peer on the dual-stack listener
+        }
+        guard allowed(host), open < ClipTcp.maxOpen else { c.cancel(); return }
+        open += 1
+        c.stateUpdateHandler = { [weak self] st in
+            switch st { case .cancelled, .failed: self?.open -= 1; c.stateUpdateHandler = nil; default: break }
+        }
         c.start(queue: queue)
+        // The length must arrive within 10 s.
+        final class Flag { var got = false }
+        let headGot = Flag()
+        queue.asyncAfter(deadline: .now() + 10) { if !headGot.got { c.cancel() } }
         c.receive(minimumIncompleteLength: 4, maximumLength: 4) { [weak self] head, _, _, _ in
+            headGot.got = true
             guard let head, head.count == 4 else { c.cancel(); return }
             let b = [UInt8](head)
             let len = Int(b[0]) << 24 | Int(b[1]) << 16 | Int(b[2]) << 8 | Int(b[3])
@@ -171,6 +205,8 @@ final class ClipTcp {
 final class ClipBle: NSObject, CBPeripheralManagerDelegate, CBCentralManagerDelegate, CBPeripheralDelegate {
     static let service = CBUUID(string: "EAC1B000-5EED-4C1E-8A00-000000000001")
     static let inbox = CBUUID(string: "EAC1B001-5EED-4C1E-8A00-000000000001")
+    /// Read: the device's name (v4 advertisements carry only an id).
+    static let nameChar = CBUUID(string: "EAC1B002-5EED-4C1E-8A00-000000000001")
     /// Text frames above this size go over Wi-Fi only.
     static let maxFrame = 64 * 1024
 
@@ -179,12 +215,25 @@ final class ClipBle: NSObject, CBPeripheralManagerDelegate, CBCentralManagerDele
     private let assembler = ClipChunks.Assembler()
     var onFrame: ((Data) -> Void)?
 
-    private struct Job { let dev: String; let id: UUID; let chunks: [Data]; let attempt: Int }
+    /// A send of chunks to a device, or (lookup set) reading the name of the device behind a Bluetooth LE id.
+    private struct Job { let dev: String; let id: UUID; let chunks: [Data]; let attempt: Int; var lookup: Int? = nil }
+    private var lookedUp: [Int: Date] = [:]
+
+    /// Reads the name of an unknown device id once (at most every 60 s per id) and adds it to the name book.
+    func lookupName(id devId: Int, peripheral: UUID) {
+        if let at = lookedUp[devId], Date().timeIntervalSince(at) < 60 { return }
+        lookedUp[devId] = Date()
+        jobs.append(Job(dev: "id \(String(format: "%04x", devId))", id: peripheral, chunks: [], attempt: 2, lookup: devId))
+        nextJob()
+    }
     /// The newest Bluetooth identifier of a device, for a retry after a failed send.
     var freshId: (String) -> UUID? = { _ in nil }
     private var jobs: [Job] = []
     private var current: (job: Job, peripheral: CBPeripheral, next: Int)?
     private var jobTimer: Timer?
+
+    /// The shared secret, to check a name read from another device against its id.
+    var secret = ""
 
     override init() {
         super.init()
@@ -194,13 +243,28 @@ final class ClipBle: NSObject, CBPeripheralManagerDelegate, CBCentralManagerDele
 
     // MARK: server
 
+    /// This device's name, served by the name characteristic so others can map its Bluetooth LE id to it.
+    var selfName = ""
+
     func peripheralManagerDidUpdateState(_ p: CBPeripheralManager) {
         guard p.state == .poweredOn else { return }
-        let ch = CBMutableCharacteristic(type: ClipBle.inbox, properties: [.write, .writeWithoutResponse], value: nil, permissions: [.writeable])
+        // Both need an encrypted link: the first connection between two devices asks once to pair them. Paired devices
+        // recognise each other's changing Bluetooth addresses, so a send never goes to an address that is gone.
+        let ch = CBMutableCharacteristic(type: ClipBle.inbox, properties: [.write, .writeWithoutResponse], value: nil,
+                                         permissions: [.writeEncryptionRequired])
+        let name = CBMutableCharacteristic(type: ClipBle.nameChar, properties: [.read], value: nil, permissions: [.readEncryptionRequired])
         let svc = CBMutableService(type: ClipBle.service, primary: true)
-        svc.characteristics = [ch]
+        svc.characteristics = [ch, name]
         p.removeAllServices()
         p.add(svc)
+    }
+
+    func peripheralManager(_ p: CBPeripheralManager, didReceiveRead r: CBATTRequest) {
+        guard r.characteristic.uuid == ClipBle.nameChar else { p.respond(to: r, withResult: .attributeNotFound); return }
+        let v = Data(selfName.utf8)
+        guard r.offset <= v.count else { p.respond(to: r, withResult: .invalidOffset); return }
+        r.value = v.subdata(in: r.offset ..< v.count)
+        p.respond(to: r, withResult: .success)
     }
 
     func peripheralManager(_ p: CBPeripheralManager, didReceiveWrite requests: [CBATTRequest]) {
@@ -228,7 +292,10 @@ final class ClipBle: NSObject, CBPeripheralManagerDelegate, CBCentralManagerDele
 
     private func nextJob() {
         guard current == nil, !jobs.isEmpty else { return }
-        let job = jobs.removeFirst()
+        var job = jobs.removeFirst()
+        // Android devices may take a new Bluetooth address each minute: use the newest one seen, not the one from when
+        // the clip was queued (sends to other devices may have run in between).
+        if job.attempt == 1, job.lookup == nil, let id = freshId(job.dev), id != job.id { job = Job(dev: job.dev, id: id, chunks: job.chunks, attempt: 1) }
         guard let p = central.retrievePeripherals(withIdentifiers: [job.id]).first else {
             Log.write("clip: Bluetooth peer not reachable right now"); nextJob(); return
         }
@@ -237,7 +304,13 @@ final class ClipBle: NSObject, CBPeripheralManagerDelegate, CBCentralManagerDele
         stage = "connecting"
         central.connect(p)
         jobTimer?.invalidate()
-        jobTimer = Timer.scheduledTimer(withTimeInterval: 8, repeats: false) { [weak self] _ in
+        armTimer(6)
+    }
+
+    /// Connecting gets 6 s; once connected the rest gets 30 s, enough to accept the one-time pairing request.
+    private func armTimer(_ seconds: TimeInterval) {
+        jobTimer?.invalidate()
+        jobTimer = Timer.scheduledTimer(withTimeInterval: seconds, repeats: false) { [weak self] _ in
             self?.finish(ok: false, why: "timed out while \(self?.stage ?? "")")
         }
     }
@@ -246,6 +319,7 @@ final class ClipBle: NSObject, CBPeripheralManagerDelegate, CBCentralManagerDele
         jobTimer?.invalidate()
         if let c = current {
             central.cancelPeripheralConnection(c.peripheral)
+            if c.job.lookup != nil { if !ok { Log.write("ble: could not read the name of \(c.job.dev) (\(why))") }; current = nil; nextJob(); return }
             Log.write("clip: Bluetooth send to \(c.job.dev) \(ok ? "done" : "failed (\(why))")")
             // One retry with the device's newest address: some Android devices change it whenever they restart advertising.
             if !ok, c.job.attempt == 1, let id = freshId(c.job.dev) {
@@ -257,15 +331,41 @@ final class ClipBle: NSObject, CBPeripheralManagerDelegate, CBCentralManagerDele
         nextJob()
     }
 
-    func centralManager(_ c: CBCentralManager, didConnect p: CBPeripheral) { stage = "finding the clipboard service"; p.discoverServices([ClipBle.service]) }
+    func centralManager(_ c: CBCentralManager, didConnect p: CBPeripheral) {
+        stage = "finding the clipboard service"; armTimer(30); p.discoverServices([ClipBle.service])
+    }
     func centralManager(_ c: CBCentralManager, didFailToConnect p: CBPeripheral, error: Error?) { finish(ok: false, why: "could not connect") }
 
     func peripheral(_ p: CBPeripheral, didDiscoverServices error: Error?) {
-        guard let s = p.services?.first(where: { $0.uuid == ClipBle.service }) else { finish(ok: false, why: "no clipboard service"); return }
-        p.discoverCharacteristics([ClipBle.inbox], for: s)
+        guard let s = p.services?.first(where: { $0.uuid == ClipBle.service }) else {
+            // Usually EarHop on that device lost its Bluetooth clipboard service (its Bluetooth restarted); it sets it up again.
+            let found = (p.services ?? []).map(\.uuid.uuidString).joined(separator: ", ")
+            finish(ok: false, why: "no clipboard service\(error.map { ", \($0.localizedDescription)" } ?? "")\(found.isEmpty ? "" : ", found \(found)")")
+            return
+        }
+        p.discoverCharacteristics([ClipBle.inbox, ClipBle.nameChar], for: s)
     }
 
-    func peripheral(_ p: CBPeripheral, didDiscoverCharacteristicsFor s: CBService, error: Error?) { stage = "writing"; writeNext(p) }
+    func peripheral(_ p: CBPeripheral, didDiscoverCharacteristicsFor s: CBService, error: Error?) {
+        if current?.job.lookup != nil {
+            guard let ch = s.characteristics?.first(where: { $0.uuid == ClipBle.nameChar }) else { finish(ok: false, why: "no name"); return }
+            stage = "reading the name (accept the pairing request if one appears)"
+            p.readValue(for: ch)
+            return
+        }
+        stage = "writing (accept the pairing request if one appears)"; writeNext(p)
+    }
+
+    func peripheral(_ p: CBPeripheral, didUpdateValueFor ch: CBCharacteristic, error: Error?) {
+        guard let want = current?.job.lookup, ch.uuid == ClipBle.nameChar else { return }
+        if let error { finish(ok: false, why: error.localizedDescription); return }
+        let name = String(data: ch.value ?? Data(), encoding: .utf8) ?? ""
+        // Only a name that really belongs to this id (by the shared secret) is learned.
+        if DeviceNames.valid(name), DeviceNames.id(name, secret: secret) == want {
+            if NameBook.shared.add(name) { Log.write("ble: learned the device name \(name)") }
+            finish(ok: true, why: "")
+        } else { finish(ok: false, why: "name does not match its id") }
+    }
 
     private func writeNext(_ p: CBPeripheral) {
         guard let c = current, let ch = p.services?.first(where: { $0.uuid == ClipBle.service })?
@@ -275,7 +375,12 @@ final class ClipBle: NSObject, CBPeripheralManagerDelegate, CBCentralManagerDele
     }
 
     func peripheral(_ p: CBPeripheral, didWriteValueFor ch: CBCharacteristic, error: Error?) {
-        if error != nil { finish(ok: false, why: "write refused"); return }
+        if let error {
+            let e = error as NSError
+            let auth = e.domain == CBATTErrorDomain && [CBATTError.insufficientAuthentication.rawValue, CBATTError.insufficientEncryption.rawValue].contains(e.code)
+            finish(ok: false, why: auth ? "not paired: accept the pairing request on both devices" : "write refused: \(e.localizedDescription)")
+            return
+        }
         current?.next += 1
         writeNext(p)
     }
@@ -336,6 +441,10 @@ final class ClipSync {
             return
         }
         if let s = pb.string(forType: .string), !s.isEmpty {
+            if !manual, cfg.clipSkipPasswords, PasswordLike.looks(s) {
+                Log.write("clip: skipped text that looks like a password (Skip password-like text is on)")
+                return
+            }
             let d = Data(s.utf8)
             guard d.count <= ClipSync.maxText else { Log.write("clip: text too large to send (\(d.count) bytes)"); return }
             send(kind: "text", mime: "text/plain", data: d)
@@ -394,7 +503,9 @@ final class ClipSync {
 
     private func receive(_ frame: Data, via: String) {
         guard cfg.clipSync, cfg.clipReceive, !paused, let item = ClipCodec.decode(frame, secret: cfg.secret) else { return }
-        guard item.dev != cfg.deviceName, abs(Proto.nowMs() - item.ts) <= ClipCodec.maxAgeMs else { return }
+        // Within 5 minutes by the sender's own clock (its offset is learned from its status), so clocks may differ.
+        guard item.dev != cfg.deviceName,
+              ClockGuard.shared.fresh(dev: item.dev, senderMs: item.ts, nowMs: Proto.nowMs(), maxAgeMs: ClipCodec.maxAgeMs) else { return }
         lock.lock()
         let dup = seen.contains(item.id)
         lock.unlock()

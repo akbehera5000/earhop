@@ -48,7 +48,40 @@ object BlePayload {
         val f = b[4].toInt() and 0xFF
         val seq = ((b[2].toInt() and 0xFF) shl 8) or (b[3].toInt() and 0xFF)
         val prof = if (f and 32 == 0) "" else if (f and 64 != 0) "buds" else "airpods"
-        return Status(name, System.currentTimeMillis(), seq, f and 1 != 0, ears[(f shr 1) and 3], f and 8 != 0, f and 16 != 0, prof)
+        return Status(name, System.currentTimeMillis(), seq, f and 1 != 0, ears[(f shr 1) and 3], f and 8 != 0, f and 16 != 0, prof, v = 3)
+    }
+
+    /**
+     * v4, 16 bytes: [0]=0xEB [1..2]=device id (DeviceNames.id) [3..4]=seq [5]=flags (bit7: user active here in the last
+     * 30 s) [6..11]=first 6 bytes of HMAC(secret, bytes 0..5 + 12..15) [12..15]=sender clock, seconds since 1970.
+     */
+    fun encode4(s: Status, secret: String, sec: Long): ByteArray {
+        val id = DeviceNames.id(s.dev, secret)
+        val flags = (if (s.playing) 1 else 0) or (ears.indexOf(s.ear).coerceAtLeast(0) shl 1) or
+            (if (s.owner) 8 else 0) or (if (s.call) 16 else 0) or
+            (when (s.prof) { "airpods" -> 32; "buds" -> 96; else -> 0 }) or (if (s.att) 128 else 0)
+        val head = byteArrayOf(0xEB.toByte(), (id shr 8).toByte(), (id and 0xFF).toByte(),
+            ((s.seq shr 8) and 0xFF).toByte(), (s.seq and 0xFF).toByte(), flags.toByte())
+        val stamp = byteArrayOf(((sec shr 24) and 0xFF).toByte(), ((sec shr 16) and 0xFF).toByte(), ((sec shr 8) and 0xFF).toByte(), (sec and 0xFF).toByte())
+        return head + Proto.signRaw(secret, head + stamp).copyOfRange(0, 6) + stamp
+    }
+
+    class V4(val id: Int, val seq: Int, val flags: Int, val sec: Long)
+
+    fun decode4(b: ByteArray, secret: String): V4? {
+        if (b.size != 16 || b[0] != 0xEB.toByte()) return null
+        val mac = Proto.signRaw(secret, b.copyOfRange(0, 6) + b.copyOfRange(12, 16)).copyOfRange(0, 6)
+        if (!java.security.MessageDigest.isEqual(mac, b.copyOfRange(6, 12))) return null
+        fun u(i: Int) = b[i].toInt() and 0xFF
+        val sec = (u(12).toLong() shl 24) or (u(13).toLong() shl 16) or (u(14).toLong() shl 8) or u(15).toLong()
+        return V4((u(1) shl 8) or u(2), (u(3) shl 8) or u(4), u(5), sec)
+    }
+
+    fun status(m: V4, name: String): Status {
+        val f = m.flags
+        val prof = if (f and 32 == 0) "" else if (f and 64 != 0) "buds" else "airpods"
+        return Status(name, m.sec * 1000, m.seq, f and 1 != 0, ears[(f shr 1) and 3], f and 8 != 0, f and 16 != 0, prof,
+            att = f and 128 != 0, v = 4)
     }
 
     fun isNewer(new: Int, old: Int): Boolean {
@@ -71,6 +104,17 @@ object BlePayload {
     }
 }
 
+/**
+ * When to set the Bluetooth LE link up again while nobody is heard (Android can drop a scan without telling the app).
+ * The wait doubles after each restart that brought nobody back: 2, 4, 8, then every 10 minutes, so a device that is
+ * simply alone costs little. Hearing any device starts over at 2 minutes. Pure, unit tested.
+ */
+object BleWatchdog {
+    fun interval(restartsInRow: Int): Long = minOf(600_000L, 120_000L shl minOf(restartsInRow, 3))
+    fun due(now: Long, lastPeerAt: Long, scanStartedAt: Long, restartsInRow: Int): Boolean =
+        now - maxOf(lastPeerAt, scanStartedAt) > interval(restartsInRow)
+}
+
 /** Fallback transport: advertises this device status and listens for the others. */
 class BleLink(private val ctx: Context, private val secret: String, private val selfName: String,
               private val onStatus: (Status) -> Unit) {
@@ -88,17 +132,33 @@ class BleLink(private val ctx: Context, private val secret: String, private val 
     private var lastAdvertAt = 0L
     @Volatile var active = false
         private set
+    /** Watchdog restarts in a row with nobody heard (reset when a device is heard). */
+    @Volatile private var watchdogRuns = 0
+    /** When the scan was last (re)started, for the watchdog in advertise(). */
+    @Volatile private var scanStartedAt = 0L
+    /** Called when the link was set up again after Bluetooth went away (the clipboard server must be reopened too). */
+    var onRecovered: (() -> Unit)? = null
 
-    val supported: Boolean get() = BlePayload.devCodes.containsKey(selfName)
+    /** Any valid name works since v4 (the advertisement carries an id derived from it). */
+    val supported: Boolean get() = DeviceNames.valid(selfName)
+    /** A valid v4 advertisement from an id whose name is not known yet (looked up once over the clipboard service). */
+    @Volatile var onUnknownId: ((Int, android.bluetooth.BluetoothDevice) -> Unit)? = null
 
     private val scanCb = object : ScanCallback() {
         override fun onScanResult(callbackType: Int, r: ScanResult) {
             val uuids = r.scanRecord?.serviceUuids ?: return
             for (pu in uuids) {
-                val st = BlePayload.decode(BlePayload.fromUuid(pu.uuid), secret) ?: continue
+                val raw = BlePayload.fromUuid(pu.uuid)
+                val st = if (raw[0] == 0xEB.toByte()) {
+                    val m = BlePayload.decode4(raw, secret) ?: continue
+                    val name = NameBook.name(m.id)
+                    if (name == null) { r.device?.let { d -> onUnknownId?.invoke(m.id, d) }; continue }
+                    BlePayload.status(m, name)
+                } else BlePayload.decode(raw, secret) ?: continue // a device still on the old format (before 1.3)
                 if (st.dev == selfName) continue
                 val now = System.currentTimeMillis()
                 lastPeerAt = now
+                watchdogRuns = 0
                 r.device?.let { EhState.bleDevices[st.dev] = Pair(it, now) }
                 // The scan reports the same advertisement many times a second. Pass on a new one at once and a repeat
                 // every 0.5 s; the service decides which copy is newest and treats repeats as "still here".
@@ -107,6 +167,11 @@ class BleLink(private val ctx: Context, private val secret: String, private val 
                 lastForward[st.dev] = Pair(st.seq, now)
                 onStatus(st)
             }
+        }
+
+        override fun onScanFailed(errorCode: Int) {
+            EhLog.w("ble: scan failed code=$errorCode, trying again shortly")
+            scanStartedAt = 0L
         }
     }
 
@@ -132,16 +197,34 @@ class BleLink(private val ctx: Context, private val secret: String, private val 
         }
     }
 
+    /**
+     * Sets the scan and advertisement up again with fresh scanner and advertiser objects. Needed after Android's
+     * Bluetooth restarts (switched off and on, or its process restarted): the old scan registration is gone for good,
+     * while a restarted advertisement still works, so other devices keep hearing this one but it hears nobody.
+     */
+    fun restart(why: String) {
+        if (!active) return
+        EhLog.w("ble: setting the Bluetooth LE link up again ($why)")
+        try { scanner?.stopScan(scanCb) } catch (e: Exception) { }
+        try { advertiser?.stopAdvertising(advCb) } catch (e: Exception) { }
+        active = false
+        lastKey = "" // advertise again at once
+        setActive(true)
+        onRecovered?.invoke()
+    }
+
     @SuppressLint("MissingPermission")
     private fun startScan() {
+        // First byte 0xEA (old format) or 0xEB (v4): the mask ignores the lowest bit.
         val magic = UUID.fromString("ea000000-0000-0000-0000-000000000000")
-        val mask = UUID.fromString("ff000000-0000-0000-0000-000000000000")
+        val mask = UUID.fromString("fe000000-0000-0000-0000-000000000000")
         val filter = ScanFilter.Builder().setServiceUuid(ParcelUuid(magic), ParcelUuid(mask)).build()
         // Balanced in low power, so a device that appears is still noticed within a few seconds.
         val mode = if (lowPower) ScanSettings.SCAN_MODE_BALANCED else ScanSettings.SCAN_MODE_LOW_LATENCY
         try {
             scanner?.stopScan(scanCb)
             scanner?.startScan(listOf(filter), ScanSettings.Builder().setScanMode(mode).build(), scanCb)
+            scanStartedAt = System.currentTimeMillis()
         } catch (e: Exception) { EhLog.w("ble: scan failed ${e.message}") }
     }
 
@@ -155,12 +238,20 @@ class BleLink(private val ctx: Context, private val secret: String, private val 
             startScan()
             lastKey = "" // restart the advertisement with the new rate
         }
+        // Watchdog: nobody heard and the scan is older than the wait (or failed). Android can drop the scan without
+        // telling the app (a Bluetooth restart), so set everything up again; the wait grows while nobody is around.
+        val now0 = System.currentTimeMillis()
+        if (BleWatchdog.due(now0, lastPeerAt, scanStartedAt, watchdogRuns)) {
+            restart("nobody heard for ${BleWatchdog.interval(watchdogRuns) / 60_000} minutes")
+            watchdogRuns++
+        }
         // Same sequence number as Wi-Fi (low 16 bits), so receivers can tell which copy is newer.
-        val bytes = BlePayload.encode(s.copy(seq = s.seq and 0xFFFF), secret) ?: return
-        val key = "${bytes[1]}${bytes[4]}"
+        val bytes = BlePayload.encode4(s.copy(seq = s.seq and 0xFFFF), secret, System.currentTimeMillis() / 1000)
+        val key = "${bytes[1]}${bytes[2]}${bytes[5]}"
         val now = System.currentTimeMillis()
-        // Restart only when the state changed (or once a minute). Some devices give every restart a new
-        // random Bluetooth address, which breaks connections other devices are opening to send clipboard text.
+        // Restart only when the state changed (or once a minute: the signed minute stamp is refused after 2 minutes).
+        // Some devices give every restart a new random Bluetooth address, so senders of clipboard text always look up
+        // the newest one just before connecting.
         if (key == lastKey && now - lastAdvertAt < 60_000) return
         lastKey = key
         lastAdvertAt = now

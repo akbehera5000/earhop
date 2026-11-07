@@ -1,5 +1,54 @@
 # Changelog
 
+## 2026-11-08, stage 1 of the fix list: new link format, pairing, fixes (Mac and Android 1.3.0)
+
+All devices must run 1.3.0: the link format changed (a 1.3 device still reads older devices; older devices cannot read
+1.3).
+
+* Free device names (lower case letters, digits and -, up to 20), any number of devices. Bluetooth LE carries a 16 bit
+  id derived from the name with the secret; an unknown id's name is read once from that device and remembered.
+* Clocks no longer need to agree. Each device learns how far every other device's clock is off and checks status and
+  clips against that. A recorded Bluetooth status replayed later is refused, and is never taken for a restart.
+* Bluetooth clipboard sends need a paired link: the first send between two devices pairs them once. After that the
+  first Bluetooth send works at once (tested: five sends to the phone a minute apart, all first attempt, 1 to 2.5 s;
+  phone and tablet both ways).
+* Speaker fallback no longer keeps the earbuds forever: out of the ears for 2 minutes lets go, unless sound is playing
+  on the speakers (then it waits until that has been quiet for 2 minutes).
+* The Bluetooth watchdog backs off while nobody is around: 2, 4, 8, then every 10 minutes.
+* The Wi-Fi clipboard port accepts only the user's devices (addresses from signed status packets), at most 4 at once,
+  and drops a connection that sends nothing within 10 s.
+* New switch "Skip password-like text" (Mac and Android), off by default so such text syncs.
+* Android: the screen settles. The once-a-second refresh re-set every text and toggled a note visible and back, so the
+  page redrew constantly and test tools could not read it. Measured on the tablet: 3 frames in 10 s while idle (was 20).
+* Android: two-column layout in landscape (earbuds card left, page right), on the phone and the tablet.
+* Android: the notification controls were hidden because "post notifications" was not allowed (notification access is a
+  different permission). Home now shows it under Needs attention with a direct link. Checked: the controls appear.
+* Android: the "state" log line is only written on change (some phones rate limit app logs and dropped the important lines);
+  the log is mirrored to /sdcard/Android/data/com.earhop.logger/files/earhop.log for adb.
+* Removed unused code (systemEnabled in the accessibility service).
+* Tests: v4 vectors in Swift, Kotlin and Python; ClockGuard, replay, device names, speaker hold, echo prevention, fresh
+  addresses, Bluetooth watchdog and password-like text (95 Android tests, Mac self test, Python self test).
+* Not done (owner's choice): catching silent copies on the phone.
+
+## 2026-11-08, clipboard sync fixed on Bluetooth, Wi-Fi and Both (Mac and Android 1.2.5)
+
+* Fixed (Android): after Android's Bluetooth was switched off and on, EarHop heard no other device and had no Bluetooth
+  clipboard service until it was restarted (the phone had been in that state for two days). EarHop now notices
+  Bluetooth coming back and sets up its scan, advertisement and clipboard service again, and a watchdog does the same
+  if nobody was heard for 2 minutes. Tested by switching the tablet's Bluetooth off and on.
+* Fixed (both): Wi-Fi clips went to old addresses from other networks when the switching link was "Bluetooth". Wi-Fi
+  status packets now also go out whenever clipboard sync is on, so every device knows the others' current address
+  (with "Bluetooth" they do not count for switching). Clips go only to addresses heard in the last 10 minutes.
+* Fixed (Android): the phone as a hotspot never broadcast on its hotspot network. It now broadcasts on every network.
+* Fixed (Android): a received image came straight back to the sender, because Android's clipboard preview looked like a
+  new copy. Clips EarHop put on the clipboard itself are never sent again automatically.
+* Bluetooth clipboard sends use each device's newest Bluetooth address (Android changes it every minute), and the Mac
+  log says which services it found when the clipboard service is missing.
+* Android: the accessibility copy trigger showed "not running" on some phones while it ran. It now shows On when the
+  service is connected.
+* Tested on the Mac, phone and tablet: text in all six directions with Bluetooth, Wi-Fi and Both, images from the Mac
+  and from the phone. dist/EarHop-1.2.5.dmg and dist/earhop new.apk (1.2.5).
+
 ## 2026-10-31, speaker fallback (Mac and Android 1.2.4)
 
 * New on both: with the earbuds connected but out of your ears, audio you start plays on the device's own speakers, and

@@ -46,6 +46,8 @@ data class HandoffSettings(
 class HandoffInput(
     val now: Long, val playing: Boolean, val ear: EarReading, val owner: Boolean, val inCall: Boolean,
     val peers: Collection<PeerState>, val gate: String?,
+    /** Speaker fallback has the sound on this device's own speaker while the earbuds are out. */
+    val onSpeaker: Boolean = false,
 )
 
 /**
@@ -244,7 +246,10 @@ class HandoffCore(var settings: HandoffSettings) {
                 if (i.gate != null) {
                     if (now - gateLoggedAt > 60000) { gateLoggedAt = now; out += HandoffAction.Info("auto claim held: ${i.gate}") }
                 } else out += startClaim("playing here", false, now)
-            } else if (i.owner && cooled && pending == null && earOutSince != 0L && now - earOutSince >= settings.releaseAfterOutMs) {
+            } else if (i.owner && cooled && pending == null && earOutSince != 0L && now - earOutSince >= settings.releaseAfterOutMs &&
+                // While the sound plays on the speaker (speaker fallback) the earbuds stay, so it can move back to them;
+                // once that has been quiet as long, they are let go as usual.
+                (!i.onSpeaker || now - lastLocalPlayingAt >= settings.releaseAfterOutMs)) {
                 out += startRelease("out of ears", now)
             } else if (i.owner && cooled && pending == null && i.playing && playingSince != 0L) {
                 // Another device started after this one: pause first, then let go, so the two never stream together.

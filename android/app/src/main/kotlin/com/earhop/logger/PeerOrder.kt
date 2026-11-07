@@ -16,11 +16,15 @@ object PeerOrder {
     }
 
     /** Whether to take this copy, and its full sequence number. A copy that is not newer only shows the device is alive. */
-    fun accept(lastSeq: Int?, seq: Int, ble: Boolean): Pair<Boolean, Int> {
+    /**
+     * [ts] and [lastTs] are the sender's clock (v4): a number far below the last one counts as a restart only when the
+     * copy is also newer by the sender's clock, so an old recording replayed later is never taken for a restart.
+     */
+    fun accept(lastSeq: Int?, seq: Int, ble: Boolean, ts: Long = Long.MAX_VALUE, lastTs: Long = Long.MIN_VALUE): Pair<Boolean, Int> {
         val last = lastSeq ?: return Pair(true, seq)
         val full = if (ble) widen(seq, last) else seq
         if (full > last) return Pair(true, full)
-        if (last - full > RESTART_GAP) return Pair(true, seq)
+        if (last - full > RESTART_GAP && ts > lastTs) return Pair(true, seq)
         return Pair(false, full)
     }
 }

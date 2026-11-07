@@ -19,8 +19,9 @@ There is no cloud, no account and no server.
 
 Earbuds: AirPods Pro 2 and Samsung Galaxy Buds2 Pro. One pair is active at a time (the "profile").
 
-The device names must be exactly `mac`, `phone` and `tab`, and every device must have a different name. Two devices
-with the same name caused the worst bug so far (see section 9).
+Device names are free since 1.3 (1 to 20 lower case letters, digits and `-`, starting with a letter or digit); `mac`,
+`phone` and `tab` are only the defaults, and any number of devices can join. Every device must have a different name.
+Two devices with the same name caused the worst bug so far (see section 9).
 
 ## 2. Repository layout
 
@@ -163,32 +164,52 @@ Android specifics worth knowing:
 
 ## 6. Protocol (must stay identical in Swift, Kotlin and Python)
 
-Wi-Fi packet: one UDP JSON datagram to port 47474.
+Wi-Fi packet: one UDP JSON datagram to port 47474. Version 4 since EarHop 1.3 (all devices must run 1.3 or later; a
+1.3 device still reads the older formats, an older device cannot read v4).
 
 ```
-{"v":3,"dev":"phone","ts":<ms>,"seq":<int>,"playing":0|1,"ear":"both|one|none|unknown","owner":0|1,"call":0|1,"prof":"airpods|buds|","sig":"<hex>"}
-canonical v3: "3|dev|ts|seq|playing|ear|owner|call|prof"   (v2 had no prof, v1 no call; both are still accepted)
-sig = HMAC-SHA256(shared secret, canonical), lower case hex
-refused: bad JSON, bad signature, |now - ts| > 30 000 ms
+{"v":4,"dev":"phone","ts":<sender ms>,"seq":<int>,"playing":0|1,"ear":"both|one|none|unknown","owner":0|1,"call":0|1,"prof":"airpods|buds|","att":0|1,"sig":"<hex>"}
+canonical v4: "4|dev|ts|seq|playing|ear|owner|call|prof|att"   (v3 had no att, v2 no prof, v1 no call)
+sig = HMAC-SHA256(shared secret, canonical), lower case hex; dev must be a valid name
+ts is the sender's own clock. It is NOT compared with the receiver's clock when decoding (v1 to v3 still need 30 s).
+ClockGuard (per device): the first copy sets the clock offset; a copy within 15 s (Wi-Fi) or 90 s (Bluetooth LE, an
+advertisement can be a minute old) of it is accepted and moves the offset to the freshest copy; a copy outside it is
+refused unless 3 copies in a row with rising sequence numbers agree on a new offset (the clock was changed).
+Clips: ClockGuard.fresh, 5 minutes by the sender's clock (accepted before its first status, the clip id stops copies).
 one sequence number per device, shared by both links (Bluetooth LE carries its low 16 bits)
 receiver (PeerOrder): take a copy only if its sequence number is newer; an older or repeated copy only marks the device
-as alive; a number more than 300 below the last means the device restarted and is taken
+as alive; a number more than 300 below the last means the device restarted, and is taken only if its ts is also newer
+than the last copy's ts (so a replayed recording is never taken for a restart)
+att (bit7 on Bluetooth LE): the user was active on that device in the last 30 s (Follow my attention)
 ```
+
+Device id (Bluetooth LE carries it instead of the name): the first two bytes of HMAC-SHA256(secret,
+"earhop dev v4|" + name), big endian. `NameBook` maps ids to names: mac, phone and tab, names from Wi-Fi packets, and
+names read from a device's Bluetooth clipboard service (characteristic `EAC1B002-...`, checked against the id), saved
+in the settings (`knownDevices`).
 
 Test vectors (keep them passing in all three implementations):
 * secret `test-secret`, canonical `1|mac|1700000000000|7|1|both|0` gives
   `389cb0b6b95b236ec9f8ee2a76263d87cf0f876d590b14c976960cbe424b4c00`
 * canonical `2|mac|1700000000000|7|1|both|0|1` gives
   `8c0b895c231d9329540318f0d015d6cc3d2e1007950972ce05ef20bf82ba2b8f`
-* BLE payload for that status at minute `1700000000000 / 60000` is `ea0000071707e997e90831cf5fb05515`
+* BLE payload (old format) for that status at minute `1700000000000 / 60000` is `ea0000071707e997e90831cf5fb05515`
 * canonical `3|mac|1700000000000|7|1|both|0|1|buds` gives
   `e0b6ceded3c4002c40a606404586e70634245c77a4f5aff28eedb1352866659d`, BLE payload `ea0000077752983dac7ce48782b05515`
+* canonical `4|mac|1700000000000|7|1|both|0|1|buds|1` gives
+  `7ad20a1aac679b7fcd58e5e67214a1531812fdb6e574eeca406f31ef8af8cf0f`; device ids of mac, phone, tab are 33190, 36699,
+  48167; v4 BLE payload for it at second 1700000000 is `eb81a60007f728611b1ffa426553f100`
 
-BLE payload (16 bytes carried as one 128 bit service UUID):
-`[0]=0xEA [1]=dev code (mac 0, phone 1, tab 2) [2..3]=seq [4]=flags [5..12]=first 8 bytes of HMAC(bytes 0..4 + 13..15)
-[13..15]=minutes since 1970, low 24 bits`. Flags: bit0 playing, bits1 to 2 ear (0 unknown, 1 none, 2 one, 3 both),
-bit3 owner, bit4 call, bit5 earbud profile known, bit6 profile is Galaxy Buds. Refused when the minute stamp is more than 2 minutes off. The BLE seq is the low 16 bits of
-the device's main sequence number. Changing this format breaks the link until every device runs the new build.
+BLE payload v4 (16 bytes carried as one 128 bit service UUID):
+`[0]=0xEB [1..2]=device id [3..4]=seq [5]=flags [6..11]=first 6 bytes of HMAC(bytes 0..5 + 12..15)
+[12..15]=sender clock, seconds since 1970`. Flags: bit0 playing, bits1 to 2 ear (0 unknown, 1 none, 2 one, 3 both),
+bit3 owner, bit4 call, bit5 earbud profile known, bit6 profile is Galaxy Buds, bit7 att. Android scans with first byte
+0xEA/0xEB (mask 0xFE). The old format (0xEA, fixed dev codes, minute stamp) is still read. Changing this format breaks
+the link until every device runs the new build.
+
+Bluetooth clipboard service `EAC1B000-5EED-4C1E-8A00-000000000001`: inbox `...B001` (write, encrypted) and name
+`...B002` (read, encrypted). Encryption makes the first connection between two devices pair them once; paired devices
+resolve each other's changing Bluetooth addresses, which ended the failed first send to Android devices.
 
 Galaxy Buds frames: `0xFD, 2 length bytes (little endian, low 10 bits = id + payload + 2), id, payload, CRC16 XModem
 (2 bytes), 0xDD`. Status id 0x61 (extended) and 0x60. Placement nibbles: 1 wearing, 2 idle, 3 or 4 in case, 0
@@ -209,7 +230,8 @@ States: `idle`, `ownerIdle`, `playingWithoutEarbuds`, `claimPending`, `ownerPlay
   not outranked, ear reading in (or unknown when `requireEar` is off, the Android default).
 * **Newest playback wins.** The owner blocks a claim only while it plays and started after us, or played within 2 s.
   Priority (default mac, tab, phone) only breaks a tie of 2.5 s.
-* **Release** when the owner: has been out of ears 120 s; or is playing and another device started playing later
+* **Release** when the owner: has been out of ears 120 s (with speaker fallback playing the sound on the speakers,
+  only once that sound has been quiet 120 s too: `HandoffInput.onSpeaker`); or is playing and another device started playing later
   (steadily for `minPlay`, after this device became owner): pause first, then release; or is idle for 2 s and another
   device started playing after this device became owner.
 * **Claim blocked**: after releasing or losing the earbuds. Cleared after 2 s of real quiet, counted from 4 s after the block.
@@ -339,6 +361,24 @@ Tooling notes:
     reflection, so renamed classes break root switching and the clipboard helper without any build error. Sign only with
     the key from `~/.earhop/android-signing.properties`; never commit the key or its passwords, and never sign a
     release with another key, because every device would have to uninstall (and lose its settings) to update.
+25. **Android's Bluetooth can restart under a running app** (switched off and on, or its process restarted). Every scan
+    and GATT server registered before is gone for good, while an advertisement the app restarts works again, so other
+    devices still hear it but it hears nobody and offers no clipboard service. `EarService.recoverBluetooth()` (on
+    STATE_ON) and the `BleLink` watchdog set it up again; anything new that registers with Bluetooth must be added there.
+26. **Clipboard Wi-Fi needs current addresses.** They come only from Wi-Fi status packets, so those go out whenever
+    clipboard sync is on, also with the switching link on "Bluetooth" (then they only teach addresses, the handoff
+    ignores them). Never send clips to every address ever learned: use the fresh ones (`current()`, `peerHostsByDev()`).
+27. **Automatic clipboard sends must skip EarHop's own writes.** Putting a received clip on the Android clipboard shows
+    Android's clipboard preview, which the accessibility trigger takes for a copy. `sendClip(auto = true)` skips clips
+    labelled EarHop, writes within 3 s, and content equal to the last received or sent clip, for images as well as text.
+28. **The screen must settle.** The Android screen refreshes once a second: set text only through the quiet views
+    (`QuietText`, `QuietButton`), never toggle a view visible and back in one refresh, and repaint segmented controls
+    only on change (`paintSeg` caches by tag). Otherwise the page redraws constantly, costs battery, and test tools
+    report "could not get idle state".
+29. **Some phones rate limit app logs.** Never log on a timer: the "state" line is written only on change. The full log is
+    mirrored to `/sdcard/Android/data/com.earhop.logger/files/earhop.log` (readable with adb).
+30. **Notification controls need "post notifications"** (Android 13 and later). Notification access (reading other apps)
+    is a different permission. Without it Android hides the running service's notification from the shade.
 
 ## 10. Working rules from the owner
 
@@ -364,6 +404,6 @@ Tooling notes:
 * Galaxy Buds controls (noise, equalizer, spatial audio, touch lock, Find My Buds) are untested on the real Buds.
 * The Buds frame offsets were never compared against GalaxyBudsClient or captured frames.
 * The Mac app is signed with a local certificate, not a Developer ID, so it is not notarized.
-* Android is `1.2.0` (versionCode 7, release build); the Mac is `1.0.0`.
+* Android is `1.3.0` (versionCode 13, release build); the Mac is `1.3.0`.
 * Shizuku start on boot and the automatic helper restart are not yet confirmed after a real phone restart.
 * Language support is not implemented.
