@@ -17,7 +17,12 @@
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
-    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
+    <!-- EarHop never uses scans for location. Without this flag Android withholds scan results from a service it restarted
+         in the background (after an update or a restart) while location is allowed only "while using the app": the
+         tablet then heard no device until EarHop was opened (2026-11-08). Location beacons (iBeacon and similar) are
+         filtered out with it; EarHop's own advertisements and the AirPods beacon are not. -->
+    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" android:usesPermissionFlags="neverForLocation"
+        tools:targetApi="s" />
     <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
     <!-- Optional, for sending copies automatically without root: READ_LOGS is granted once with adb, the overlay in Settings. -->

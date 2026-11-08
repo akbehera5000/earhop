@@ -72,7 +72,8 @@ class ClipAccessibilityService : AccessibilityService() {
         EhLog.w("clip: copy noticed (accessibility${if (systemPreview) ", clipboard preview" else ""})")
         try {
             startActivity(Intent(this, ClipActivity::class.java)
-                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                // Not a user action: a video on screen must not go into picture-in-picture by itself.
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_NO_USER_ACTION)
                 .putExtra("auto", true)
                 // The app that showed the copy message (System UI's preview does not tell), for Exclude apps.
                 .putExtra("source", if (systemPreview) null else event.packageName?.toString()))

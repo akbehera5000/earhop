@@ -34,6 +34,8 @@ final class AppState: ObservableObject {
     @Published var playingApps: [String] = []
     @Published var battery: (Int, Int)?
     @Published var caseBattery: Int?
+    /// Earbud battery levels shared by the device that holds the earbuds (a "batt" message), for the picture here.
+    @Published var remoteBattery: RemoteBattery?
     @Published var budsStatus = "off"
     @Published var keysAllowed = true
     @Published var buds = BudsProtocol.State()
@@ -165,4 +167,13 @@ extension Config {
         if accent == "auto" { return isBuds ? Config.budsAccent : Config.airpodsAccent }
         return Config.accents.first { $0.id == accent }?.color ?? Config.accents[0].color
     }
+}
+
+/// Battery levels another device read from the earbuds: left, right, case (-1 unknown) and charging, with sender and time.
+struct RemoteBattery {
+    var l: Int, r: Int, c: Int, cl: Bool, cr: Bool, cc: Bool
+    var dev: String
+    var at: Date
+    /// Fresh enough to show: from the last 10 minutes.
+    var fresh: Bool { Date().timeIntervalSince(at) < 600 }
 }

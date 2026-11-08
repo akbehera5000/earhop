@@ -35,6 +35,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if !state.cfg.onboarded && !state.cfg.airpodsAddress.isEmpty { state.cfg.onboarded = true }
         let cfg = state.cfg
         Log.write("EarHop start dev=\(cfg.deviceName) live=\(cfg.liveMode)")
+        if !Config.readOnly { OutputRestore.run() }
         // If EarHop was moved (for example from ~/Applications to /Applications), point the login item at this copy.
         if SMAppService.mainApp.status == .enabled {
             do { try SMAppService.mainApp.register() } catch { Log.write("login item: \(error.localizedDescription)") }
@@ -117,7 +118,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         state.onDiagnostics = { [weak self] in self?.collectDiagnostics() }
         clip.onControl = { [weak self] item in self?.control(item) }
         budsWear.onUserChoice = { [weak self] kind, value in
-            guard let self, self.state.cfg.ownBudsSettings else { return }
+            guard let self else { return }
+            guard self.state.cfg.ownBudsSettings else { return }
             if kind == "noise" { self.state.cfg.budsNoise = value } else { self.state.cfg.budsEq = value }
         }
         budsWear.ownSettings = { [weak self] in
@@ -313,6 +315,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var lastVolumeSent: Float = -1
     private var lastVolumeSentAt = Date.distantPast
     private var wasOwner = false
+    private var ownerAt = Date.distantPast
 
     func control(_ item: ClipItem) {
         let text = String(data: item.data, encoding: .utf8) ?? ""
@@ -322,6 +325,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard p.count >= 6 else { return }
             remoteBattery = (Int(p[0]) ?? -1, Int(p[1]) ?? -1, Int(p[2]) ?? -1, p[3] == "1", p[4] == "1", p[5] == "1", Date())
             updateIcon()
+            if state.remoteBattery?.dev != item.dev || state.remoteBattery?.fresh != true {
+                Log.write("battery: levels from \(item.dev): L\(p[0]) R\(p[1]) case \(p[2])")
+            }
+            state.remoteBattery = RemoteBattery(l: Int(p[0]) ?? -1, r: Int(p[1]) ?? -1, c: Int(p[2]) ?? -1,
+                                                cl: p[3] == "1", cr: p[4] == "1", cc: p[5] == "1", dev: item.dev, at: Date())
         case "vol":
             if let v = Float(text) { remoteVolume = (item.dev, v, Date()) }
         case "settings":
@@ -365,9 +373,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// While this Mac has the earbuds it tells the others its volume; when they arrive here it takes the last one.
+    /// This Mac's own volume profile wins over the handover. It reports only after holding the earbuds 5 s, so a stray
+    /// connection of a second or two (the earbuds reconnecting by themselves during a handoff) sets nobody's volume.
     func volumeTick(owner: Bool) {
         defer { wasOwner = owner }
-        if owner, !wasOwner, state.cfg.volumeHandover, let r = remoteVolume, r.dev != state.cfg.deviceName,
+        if owner, !wasOwner { ownerAt = Date() }
+        if owner, !wasOwner, state.cfg.volumeHandover, !state.cfg.volumeEnabled, let r = remoteVolume, r.dev != state.cfg.deviceName,
            Date().timeIntervalSince(r.at) < 600 {
             // A moment later, once the sound runs through the earbuds.
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
@@ -375,7 +386,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 Log.write("volume: set to \(Int(r.v * 100)) %, as on \(r.dev)")
             }
         }
-        guard owner, let v = OutputRoute.volume else { return }
+        guard owner, Date().timeIntervalSince(ownerAt) >= 5, let v = OutputRoute.volume else { return }
         if abs(v - lastVolumeSent) > 0.02 || Date().timeIntervalSince(lastVolumeSentAt) > 60 {
             lastVolumeSent = v; lastVolumeSentAt = Date()
             clip.sendControl(kind: "vol", data: Data(String(format: "%.3f", v).utf8), to: nil)
@@ -403,8 +414,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// earhop:// links, for Shortcuts ("Open URL"), scripts and other apps: take, release, send-clipboard,
     /// sleep?minutes=30, sleep-cancel, diagnostics.
     func application(_ app: NSApplication, open urls: [URL]) {
-        for u in urls where u.scheme == "earhop" { run(command: u.host ?? "", minutes: URLComponents(url: u, resolvingAgainstBaseURL: false)?
-            .queryItems?.first { $0.name == "minutes" }?.value.flatMap(Int.init)) }
+        for u in urls where u.scheme == "earhop" {
+            let q = URLComponents(url: u, resolvingAgainstBaseURL: false)?.queryItems ?? []
+            if u.host == "send-files" {
+                shareFiles(q.filter { $0.name == "path" }.compactMap(\.value))
+                continue
+            }
+            run(command: u.host ?? "", minutes: q.first { $0.name == "minutes" }?.value.flatMap(Int.init))
+        }
+    }
+
+    /// Files from the Share menu extension: asks with a small menu at the pointer which device gets them, then sends them
+    /// like the "Send file" button (Wi-Fi). Folders are skipped.
+    private func shareFiles(_ paths: [String]) {
+        var isDir: ObjCBool = false
+        let files = paths.map { URL(fileURLWithPath: $0) }
+            .filter { FileManager.default.fileExists(atPath: $0.path, isDirectory: &isDir) && !isDir.boolValue }
+        Log.write("share: \(files.count) file(s) from the Share menu" + (files.count < paths.count ? ", \(paths.count - files.count) folder(s) or missing item(s) skipped" : ""))
+        guard !files.isEmpty else { Notifier.post("EarHop", "Folders cannot be sent, only files."); return }
+        let devs = Set(clip.wifiPeers().map(\.dev)).subtracting([state.cfg.deviceName]).sorted()
+        guard !devs.isEmpty else { Notifier.post("Not sent", "No other device is on Wi-Fi right now."); return }
+        let title = files.count == 1 ? files[0].lastPathComponent : "\(files.count) files"
+        // A panel of its own, not a pop-up menu: EarHop has no window, and a menu opened without one did not appear.
+        SharePicker.show(title: title, devices: devs) { [weak self] dev in
+            Log.write("share: sending to \(dev ?? "all devices")")
+            self?.clip.sendFiles(files, to: dev.map { [$0] })
+        }
     }
 
     /// One automation command (earhop:// links and AppleScript).
@@ -453,7 +488,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applySharedSettings(_ text: String, from dev: String) {
         let remote = SettingsSync.decode(Data(text.utf8))
-        let apply = SettingsSync.merge(local: state.cfg.settingsStamps, remote: remote, offsetMs: ClockGuard.shared.offset(dev) ?? 0)
+        let apply = SettingsSync.merge(local: state.cfg.settingsStamps, remote: remote, offsetMs: ClockGuard.shared.offset(dev) ?? 0,
+                                       localValues: SettingsSync.values(state.cfg), nowMs: Proto.nowMs())
         guard !apply.isEmpty else { return }
         var c = state.cfg
         for (k, r) in apply { SettingsSync.apply(k, r.value, to: &c); c.settingsStamps[k] = r.stamp }
@@ -660,6 +696,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let cb = ears?.caseBattery
         if cb != state.caseBattery { state.caseBattery = cb; updateIcon() }
         state.peers = controller.peerInfos()
+        let holders = state.peers.filter { $0.owner && $0.age < 5 }.map(\.name)
+        BlueUtil.setPeerOwners(holders.isEmpty ? nil : holders.joined(separator: ", "))
         updateIcon()
     }
 
@@ -849,6 +887,42 @@ if CommandLine.arguments.contains("--selftest") {
     let rem: [String: (value: Any, stamp: Int64)] = ["clipSync": (false, 5000), "autoSwitch": (true, 1000), "secret": ("x", 9000)]
     let mg = SettingsSync.merge(local: ["clipSync": 2000, "autoSwitch": 3000], remote: rem, offsetMs: 1000)
     check("settings: newer change wins, older and local-only keys ignored", mg.keys.sorted() == ["clipSync"] && mg["clipSync"]?.stamp == 4000)
+    let echo = SettingsSync.merge(local: ["clipSync": 2000, "sleepMinutes": 2000],
+                                  remote: ["clipSync": (NSNumber(value: true), 9000), "sleepMinutes": (NSNumber(value: 45), 9000)],
+                                  offsetMs: 0, localValues: ["clipSync": true, "sleepMinutes": 30])
+    check("settings: an equal value is not taken again (no echo)", echo.keys.sorted() == ["sleepMinutes"])
+    let future = SettingsSync.merge(local: ["clipSync": 2000], remote: ["clipSync": (NSNumber(value: false), 500_000)], offsetMs: 0,
+                                    localValues: ["clipSync": true], nowMs: 100_000)
+    check("settings: a stamp far in the future is refused", future.isEmpty)
+    // Clipboard routing: text over Bluetooth, Wi-Fi only for devices Bluetooth cannot reach; images over Wi-Fi.
+    let all: Set<String> = ["phone", "tab"]
+    let r1 = ClipRoute.plan(kind: "text", size: 100, mode: "both", wanted: all, ble: ["phone", "tab"], wifi: ["phone", "tab"], maxBle: 65536)
+    check("route: text over Bluetooth only when Bluetooth reaches", r1.ble == all && r1.wifi.isEmpty)
+    let r2 = ClipRoute.plan(kind: "text", size: 100, mode: "both", wanted: all, ble: ["phone"], wifi: ["phone", "tab"], maxBle: 65536)
+    check("route: text over Wi-Fi to a device Bluetooth cannot reach", r2.ble == ["phone"] && r2.wifi == ["tab"])
+    let r3 = ClipRoute.plan(kind: "image", size: 20000, mode: "both", wanted: all, ble: ["phone", "tab"], wifi: ["phone"], maxBle: 65536)
+    check("route: image over Wi-Fi, Bluetooth only without a Wi-Fi route", r3.wifi == ["phone"] && r3.ble == ["tab"])
+    let r4 = ClipRoute.plan(kind: "image", size: 900000, mode: "both", wanted: all, ble: ["phone", "tab"], wifi: [], maxBle: 65536)
+    check("route: a large image never goes over Bluetooth", r4.ble.isEmpty && r4.wifi.isEmpty)
+    let r5 = ClipRoute.plan(kind: "text", size: 100, mode: "wifi", wanted: all, ble: all, wifi: all, maxBle: 65536)
+    check("route: Wi-Fi mode never uses Bluetooth", r5.ble.isEmpty && r5.wifi == all)
+    let bh = BleHealth(), bt0 = Date()
+    _ = bh.report("tab", ok: false, pairing: false, now: bt0)
+    check("ble health: one failure does not rest the device", bh.usable("tab", now: bt0))
+    _ = bh.report("tab", ok: false, pairing: false, now: bt0)
+    check("ble health: two failures rest it 2 min", !bh.usable("tab", now: bt0.addingTimeInterval(60)) && bh.usable("tab", now: bt0.addingTimeInterval(121)))
+    _ = bh.report("phone", ok: false, pairing: true, now: bt0)
+    check("ble health: a pairing refusal stops tries for 6 hours", !bh.usable("phone", now: bt0.addingTimeInterval(5 * 3600)) && bh.needsPairing("phone"))
+    check("ble health: works again after success", bh.report("tab", ok: true, pairing: false, now: bt0) != nil && bh.usable("tab", now: bt0))
+    check("ble health: a device that worked counts as paired", bh.knownGood("tab") && !bh.knownGood("phone"))
+    bh.paired("phone")
+    check("ble health: Bluetooth from a device clears its pairing note", bh.knownGood("phone") && !bh.needsPairing("phone") && bh.usable("phone", now: bt0))
+    let lr = LogRepeat(), lt = Date()
+    check("log: a failure line is written once, then dropped for 5 min",
+          lr.gate("clip: Bluetooth send to tab failed (x 12)", now: lt) != nil && lr.gate("clip: Bluetooth send to tab failed (x 13)", now: lt.addingTimeInterval(5)) == nil
+          && lr.gate("sm: idle -> ownerIdle", now: lt) != nil)
+    check("log: the next one after 5 min carries the count",
+          lr.gate("clip: Bluetooth send to tab failed (x 14)", now: lt.addingTimeInterval(301))?.contains("and 1 more") == true)
     var sc = Config(secret: "k")
     SettingsSync.apply("clipTransport", "wifi", to: &sc); SettingsSync.apply("clipTransport", "bad", to: &sc)
     check("settings: values checked", sc.clipTransport == "wifi")
@@ -985,6 +1059,10 @@ if CommandLine.arguments.contains("--selftest") {
     check("call peer makes owner release", yielded)
 
     runHandoffSimTests(check)
+    // Fix 6: the same timelines with the real connect and disconnect times seen on the Buds (7 s and 1.5 s).
+    HandoffSim.defaultConnect = 7; HandoffSim.defaultDisconnect = 1.5
+    runHandoffSimTests { name, ok in check("real timing: " + name, ok) }
+    HandoffSim.defaultConnect = 1.5; HandoffSim.defaultDisconnect = 0.5
 
     // Clipboard: encrypted frame, wrong secret, tampering, chunks out of order.
     let clipItem = ClipItem(id: "0011223344556677", dev: "mac", kind: "text", mime: "text/plain", ts: 1700000000000, data: Data("hello EarHop".utf8))

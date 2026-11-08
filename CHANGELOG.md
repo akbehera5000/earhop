@@ -1,5 +1,80 @@
 # Changelog
 
+## 2026-11-08: Mac Share menu and file notifications
+
+* Mac: EarHop is in the Share menu (Finder, Preview and other apps). A small sandboxed extension
+  (`mac/ShareExtension`, built and signed by `package.sh`) hands the files to EarHop with `earhop://send-files`, and
+  EarHop shows a "Send to" panel like the Android share sheet (round device buttons in a row, `SharePicker.swift`) (Wi-Fi, like the Send file button). Folders are skipped.
+* Mac: notifications now have a delegate, so they also show while the popover or Settings is open, and clicking a
+  "file received" notification shows the file in Finder. The app logs whether macOS allows its notifications
+  ("notifications: not allowed in System Settings" was the reason received files gave no notice).
+* Mac: a Bluetooth clipboard write that timed out was taken for a missing pairing ("needs pairing again", no Bluetooth
+  tries for 6 hours) even with a device that had just worked over Bluetooth. A timeout now counts as a pairing problem
+  only for a device that has not worked over Bluetooth since EarHop started; otherwise it is an ordinary failure with
+  the short backoff (`BleHealth.knownGood`).
+
+## 2026-11-08, clipboard over Bluetooth, pairing requests, root toast, video popups, hardening (Mac and Android)
+
+* Clipboard route (setting "Both", the default): text and small messages over Bluetooth; a device Bluetooth cannot
+  reach gets them over Wi-Fi instead. Images over Wi-Fi (Bluetooth only for a device with no Wi-Fi route, when small).
+  "Bluetooth" and "Wi-Fi" modes stay strict. Pure rule `ClipRoute`, tested on both apps.
+* Fixed: text from the tablet reached the phone late or never. Bluetooth sends went one after the other, and every
+  send to the Mac (pairing broken on one side) hung 30 s first. Each device now has its own queue (Android) and
+  copied text goes first (both apps).
+* Fixed: repeated pairing requests. A device that refuses for lack of pairing gets no Bluetooth tries for 6 hours,
+  until Android reports a new pairing, or until a message from it arrives over Bluetooth; other failures wait 2 to 10
+  minutes (`BleHealth`, tested). A paired device gets 10 s instead of 30 s to accept a write. A send that collides with
+  the other device connecting at the same moment is retried once after 1.5 s.
+* Fixed: the "EarHop granted root access" toast. Root commands share one open root shell instead of a new `su` each
+  time (one toast when EarHop starts). The root Bluetooth helper is checked once; on the tablet it cannot reach
+  Bluetooth, so switching no longer tries it and Settings says so.
+* Fixed: videos going into picture-in-picture by themselves. Android clears the clipboard an hour after the last copy;
+  EarHop took that for a copy and opened its send screen. That clear is now ignored (`ClipRules.isAutoClear`, tested)
+  and every automatic opening of the send screen is marked as not a user action, so the video app stays.
+* Fixed: after an update or restart in the background the tablet heard no device over Bluetooth until EarHop was
+  opened (scan results withheld without "while in use" location). BLUETOOTH_SCAN is now declared `neverForLocation`.
+* Fixed: a clip delivered over and over during a stuck Bluetooth write got a receipt every time (1,400 queued sends
+  from the phone to the Mac). One receipt per clip every 3 s, and a cap of 30 waiting control messages per device.
+* Hardening 2 to 7: repeated failure lines are written once per 5 minutes with a count (`LogRepeat`); settings stamps
+  more than a minute in the future are refused; Buds noise and equalizer are applied only after 5 s of holding them;
+  every switching timeline also runs with real connect times (7 s) on both apps; the Mac checks the earbuds' audio
+  device is alive and logs when IOBluetooth still disagrees after 5 s.
+* Checked on the devices: text in all six directions over Bluetooth in "Both" and "Bluetooth"; Wi-Fi mode between
+  the Mac and each Android device; an image from the Mac over Wi-Fi to both. Not possible here: phone and tablet over
+  Wi-Fi (the hotspot blocks traffic between them). Not tried: AirPods beacon with `neverForLocation`.
+
+## 2026-11-08, logic audit fixes (Mac and Android)
+
+* Fixed: playing on the Mac and then on the phone sometimes sent the Buds to the tablet first. When the Mac let go, the
+  Buds reconnected by themselves to the idle tablet, which kept them because the phone's playback had started before
+  the tablet got them. A device that gets the earbuds without asking, within 15 s of another device letting go, now
+  hands them on at once to the device that is playing and waiting for them. A manual connect is not affected.
+  New simulator tests on both apps (sim13, sim14, `strayReconnectIsHandedOn`, `manualConnectWhileAnotherPlaysIsKept`);
+  the first fails without the fix.
+* Fixed: the same shared settings (low battery alerts, pause when one is out, sleep timer, link) were "applied" again
+  every few minutes on every device. Each device echoed the others' stamps, which grew a little every time, so an old
+  value could beat a newer change. An equal value is no longer taken. Tested on both apps.
+* Fixed: the volume handover overwrote the device's own volume profile 1.5 s after it was set, and a stray connection
+  of a second or two passed its volume on to the other devices. The profile now wins, and a device reports its volume
+  only after holding the earbuds 5 s.
+* Root connect on the tablet: it crashed on every try (no Bluetooth adapter in the root helper on this Android
+  version). It now fails cleanly; still not working, the normal connect is used.
+* Not yet tried on the real devices: the stray handover (the logs show the cause; the fix is covered by tests only).
+
+## 2026-11-08, 360 Audio and head tracking removed (Mac and Android)
+
+* The 360 Audio and head tracking controls are gone from the Mac popover, the Mac Settings, and the Android Buds page.
+  The Mac renderer that captured the Mac's sound is removed: on the owner's Mac it froze EarHop and left the sound
+  output on BlackHole. At launch the Mac app now puts the output back if that test left it there (done on the owner's
+  Mac: output back on the Buds). Microphone and audio capture usage texts removed from Info.plist.
+* Tested: Mac self test, 104 Android unit tests, both apps build. Not tried yet on the phone or tablet.
+* Mac popover: the equalizer is six round buttons side by side (Off, Bass, Soft, Dynamic, Clear, Treble), like the
+  noise control, each with a small bar icon of its sound; a custom preset from Galaxy Wearable shows a note.
+* Mac popover: when the Buds are on another device, the picture shows the battery levels (left, right, case, charging)
+  that device shares, and the wear state from its status. Tested: levels from the phone arrived on the Mac.
+* Android: the equalizer is six round buttons side by side like the noise control (was a slider), on phone and tablet.
+  Checked on screen on both (the first build drew the bar icons too large and they overlapped; fixed).
+
 ## 2026-11-08, stage 3 of the list: features (Mac and Android 1.4.0)
 
 * Files and photos between devices over Wi-Fi, any size, streamed and encrypted per 1 MB record; Android share target

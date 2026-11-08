@@ -26,8 +26,11 @@ object EhLog {
     }
     @Volatile private var mirror: java.io.File? = null
 
+    private val repeats = LogRepeat()
+
     @Synchronized
-    fun w(msg: String) {
+    fun w(msg0: String) {
+        val msg = repeats.gate(msg0, System.currentTimeMillis()) ?: return
         Log.i("EarHop", msg)
         val line = "${fmt.format(Date())} $msg"
         lines.addLast(line)
@@ -130,4 +133,23 @@ object EhState {
     @Volatile var sleepUntil = 0L
     /** When a device's copies were last refused for being far off its clock offset (for the status page). */
     val clockRefused = java.util.concurrent.ConcurrentHashMap<String, Long>()
+}
+
+/**
+ * Repeated failure lines (the same text apart from numbers) are written once, then dropped for 5 minutes; the next
+ * one carries how many were dropped. Without it one device that could not be reached filled the log in hours and
+ * pushed the switching lines out. Other lines always pass. Same rule as LogRepeat in Config.swift. Pure, tested.
+ */
+class LogRepeat {
+    private val seen = HashMap<String, Pair<Long, Int>>()
+    private val digits = Regex("[0-9]+")
+    @Synchronized fun gate(msg: String, now: Long): String? {
+        if (!(msg.contains("failed") || msg.contains("retrying") || msg.contains("not reachable"))) return msg
+        val key = digits.replace(msg, "#")
+        val (at, dropped) = seen[key] ?: Pair(0L, 0)
+        if (at != 0L && now - at < 300_000) { seen[key] = Pair(at, dropped + 1); return null }
+        seen[key] = Pair(now, 0)
+        if (seen.size > 200) seen.entries.removeIf { now - it.value.first > 300_000 }
+        return if (dropped > 0) "$msg (and $dropped more like this in the last ${(now - at) / 60_000} min)" else msg
+    }
 }

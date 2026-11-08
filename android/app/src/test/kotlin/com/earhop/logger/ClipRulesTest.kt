@@ -2,6 +2,7 @@ package com.earhop.logger
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -92,5 +93,43 @@ class ClipRulesTest {
         assertEquals("mac", ClipCodec.decode(f, "k")!!.to)
         val g = ClipCodec.encode(ClipItem("y", "phone", "text", "text/plain", 1, "hi".toByteArray()), "k")!!
         assertEquals("", ClipCodec.decode(g, "k")!!.to)
+    }
+
+    @Test fun routeTextOverBluetoothImagesOverWifi() {
+        val all = setOf("mac", "tab")
+        val r1 = ClipRoute.plan("text", 100, "both", all, all, all, 65536)
+        assertEquals(all, r1.first); assertEquals(emptySet<String>(), r1.second)
+        val r2 = ClipRoute.plan("text", 100, "both", all, setOf("mac"), all, 65536)
+        assertEquals(setOf("mac"), r2.first); assertEquals(setOf("tab"), r2.second)
+        val r3 = ClipRoute.plan("image", 20000, "both", all, all, setOf("mac"), 65536)
+        assertEquals(setOf("tab"), r3.first); assertEquals(setOf("mac"), r3.second)
+        val r4 = ClipRoute.plan("image", 900000, "both", all, all, emptySet(), 65536)
+        assertTrue(r4.first.isEmpty() && r4.second.isEmpty())
+        val r5 = ClipRoute.plan("text", 100, "wifi", all, all, all, 65536)
+        assertTrue(r5.first.isEmpty()); assertEquals(all, r5.second)
+    }
+
+    @Test fun bleHealthBacksOffAndStopsPairingRequests() {
+        val h = BleHealth(); val t = 1_000_000L
+        h.report("tab", false, false, t); assertTrue(h.usable("tab", t))
+        h.report("tab", false, false, t); assertFalse(h.usable("tab", t + 60_000)); assertTrue(h.usable("tab", t + 121_000))
+        h.report("mac", false, true, t); assertFalse(h.usable("mac", t + 5 * 3600_000L)); assertTrue(h.needsPairing("mac"))
+        h.paired("mac"); assertTrue(h.usable("mac", t))
+        assertNotNull(h.report("tab", true, false, t)); assertTrue(h.usable("tab", t))
+    }
+
+    @Test fun androidHourlyClearIsNotACopy() {
+        val t = 1_000_000_000L
+        assertTrue(ClipRules.isAutoClear(t + 3_600_090L, t))   // 60 min after the last copy, as seen on the tablet
+        assertFalse(ClipRules.isAutoClear(t + 120_000L, t))
+        assertFalse(ClipRules.isAutoClear(t + 3_600_000L, 0L))
+    }
+
+    @Test fun repeatedFailureLinesAreThinnedOut() {
+        val r = LogRepeat(); val t = 1_000_000L
+        assertNotNull(r.gate("clip: Wi-Fi send to 10.0.0.1 failed after 5000ms", t))
+        assertEquals(null, r.gate("clip: Wi-Fi send to 10.0.0.1 failed after 5001ms", t + 5000))
+        assertNotNull(r.gate("sm: idle -> owner_idle", t + 5000))
+        assertTrue(r.gate("clip: Wi-Fi send to 10.0.0.1 failed after 5000ms", t + 301_000)!!.contains("and 1 more"))
     }
 }

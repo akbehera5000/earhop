@@ -14,6 +14,8 @@ struct BudsPicture: View {
 
     let model: Model
     var tint: Color = .accentColor
+    /// 156 in Settings; the popover uses a lower one.
+    var height: CGFloat = 156
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @StateObject private var motion = Motion()
 
@@ -32,7 +34,7 @@ struct BudsPicture: View {
         TimelineView(.animation(minimumInterval: 1.0 / 30, paused: !alive)) { tl in
             Canvas { ctx, size in draw(&ctx, size, t: tl.date.timeIntervalSince(motion.start)) }
         }
-        .frame(height: 156)
+        .frame(height: height)
         .onChange(of: model) { _ in motion.moving = true }
         .accessibilityElement()
         .accessibilityLabel(describe())
@@ -45,7 +47,8 @@ struct BudsPicture: View {
         let low = Color.red
 
         // Case, with the lid tipped open while a bud is out.
-        let caseW = min(w * 0.36, 128), caseH: CGFloat = 56
+        // The case stays narrow and the buds sit well outside it, so they never overlap the open lid.
+        let caseW = min(w * 0.30, 110), caseH: CGFloat = 56
         let caseTop = h - caseH - 24
         let anyOut = [m.left, m.right].contains { $0.place == "wearing" || $0.place == "idle" }
         let body = Path(roundedRect: CGRect(x: cx - caseW / 2, y: caseTop, width: caseW, height: caseH), cornerRadius: 22)
@@ -72,10 +75,10 @@ struct BudsPicture: View {
             let bob = reduceMotion ? 0 : CGFloat(sin(t * 2 + Double(side) * 1.4)) * 3.5
             let target: [CGFloat]
             switch bud.place {
-            case "wearing": target = [cx + sign * w * 0.29, 44 + bob, 1, 1]
+            case "wearing": target = [cx + sign * w * 0.34, 44 + bob, 1, 1]
             case "case": target = [cx + sign * caseW * 0.22, caseTop + caseH * 0.42, 0.62, 1]
-            case "idle": target = [cx + sign * w * 0.33, caseTop + caseH * 0.2, 0.85, 0.55]
-            default: target = [cx + sign * w * 0.29, 48, 0.95, m.here ? 0.75 : 0.45]
+            case "idle": target = [cx + sign * w * 0.37, caseTop + caseH * 0.2, 0.85, 0.55]
+            default: target = [cx + sign * w * 0.34, 48, 0.95, m.here ? 0.75 : 0.45]
             }
             var p = motion.pos[side]
             if p[0].isNaN { p = target }

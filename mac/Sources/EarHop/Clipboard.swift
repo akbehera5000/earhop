@@ -328,7 +328,9 @@ final class ClipBle: NSObject, CBPeripheralManagerDelegate, CBCentralManagerDele
     var onFrame: ((Data) -> Void)?
 
     /// A send of chunks to a device, or (lookup set) reading the name of the device behind a Bluetooth LE id.
-    private struct Job { let dev: String; let id: UUID; let chunks: [Data]; let attempt: Int; var lookup: Int? = nil }
+    private struct Job { let dev: String; let id: UUID; let chunks: [Data]; let attempt: Int; var lookup: Int? = nil; var onFail: (() -> Void)? = nil
+                         var urgent = false }
+    let health = BleHealth()
     private var lookedUp: [Int: Date] = [:]
 
     /// Reads the name of an unknown device id once (at most every 60 s per id) and adds it to the name book.
@@ -399,12 +401,24 @@ final class ClipBle: NSObject, CBPeripheralManagerDelegate, CBCentralManagerDele
 
     func centralManagerDidUpdateState(_ c: CBCentralManager) {}
 
-    /// Sends a frame to each peer (by the identifier its status advertisement came from), one after the other.
-    func send(_ frame: Data, to peers: [(dev: String, id: UUID)]) {
-        guard frame.count <= ClipBle.maxFrame, central.state == .poweredOn else { return }
+    /// Sends a frame to each peer (by the identifier its status advertisement came from), one after the other. A peer
+    /// that fails, or is resting after failures, is handed to `onFail`, which sends to it over Wi-Fi instead.
+    func send(_ frame: Data, to peers: [(dev: String, id: UUID)], first: Bool = false, onFail: @escaping (String) -> Void = { _ in }) {
+        guard frame.count <= ClipBle.maxFrame, central.state == .poweredOn else { peers.forEach { onFail($0.dev) }; return }
         let tag = UInt32.random(in: 0 ... UInt32.max)
         // 180 byte writes fit the usual negotiated MTU of 185 on both Android and macOS.
-        for p in peers { jobs.append(Job(dev: p.dev, id: p.id, chunks: ClipChunks.split(frame, payload: 172, tag: tag), attempt: 1)) }
+        // What the user copied goes ahead of queued battery, volume and settings messages.
+        var at = first ? (jobs.firstIndex { !$0.urgent } ?? jobs.count) : jobs.count
+        for p in peers {
+            let dev = p.dev
+            // A safety cap: with more than 30 messages already waiting for one device, new control messages to it are
+            // dropped (copied text never is). Nothing should ever pile up like that; if it does, it must not snowball.
+            if !first, jobs.filter({ $0.dev == dev }).count > 30 {
+                Log.write("clip: Bluetooth queue to \(dev) is full, a control message was dropped (failed to keep up)"); onFail(dev); continue
+            }
+            jobs.insert(Job(dev: dev, id: p.id, chunks: ClipChunks.split(frame, payload: 172, tag: tag), attempt: 1, onFail: { onFail(dev) }, urgent: first), at: at)
+            at += 1
+        }
         nextJob()
     }
 
@@ -413,11 +427,13 @@ final class ClipBle: NSObject, CBPeripheralManagerDelegate, CBCentralManagerDele
     private func nextJob() {
         guard current == nil, !jobs.isEmpty else { return }
         var job = jobs.removeFirst()
+        // A device resting after failures is skipped at once (its clips go over Wi-Fi), so it holds up nobody.
+        if job.lookup == nil, !health.usable(job.dev, now: Date()) { job.onFail?(); nextJob(); return }
         // Android devices may take a new Bluetooth address each minute: use the newest one seen, not the one from when
         // the clip was queued (sends to other devices may have run in between).
         if job.attempt == 1, job.lookup == nil, let id = freshId(job.dev), id != job.id { job = Job(dev: job.dev, id: id, chunks: job.chunks, attempt: 1) }
         guard let p = central.retrievePeripherals(withIdentifiers: [job.id]).first else {
-            Log.write("clip: Bluetooth peer not reachable right now"); nextJob(); return
+            Log.write("clip: Bluetooth peer not reachable right now"); job.onFail?(); nextJob(); return
         }
         current = (job, p, 0)
         p.delegate = self
@@ -441,10 +457,22 @@ final class ClipBle: NSObject, CBPeripheralManagerDelegate, CBCentralManagerDele
             central.cancelPeripheralConnection(c.peripheral)
             if c.job.lookup != nil { if !ok { Log.write("ble: could not read the name of \(c.job.dev) (\(why))") }; current = nil; nextJob(); return }
             Log.write("clip: Bluetooth send to \(c.job.dev) \(ok ? "done" : "failed (\(why))")")
-            // One retry with the device's newest address: some Android devices change it whenever they restart advertising.
-            if !ok, c.job.attempt == 1, let id = freshId(c.job.dev) {
-                jobs.append(Job(dev: c.job.dev, id: id, chunks: c.job.chunks, attempt: 2))
-                Log.write("clip: retrying \(c.job.dev) with its newest Bluetooth address\(id == c.job.id ? " (unchanged)" : "")")
+            // Refused for lack of pairing, or the write timed out on a device that never worked over Bluetooth (the
+            // pairing request was not accepted). A timeout with a device that already worked is an ordinary failure.
+            let pairing = !ok && (why.hasPrefix("not paired") || (why.contains("while writing") && !health.knownGood(c.job.dev)))
+            // One retry, only with a newer address: some Android devices change it whenever they restart advertising.
+            let collision = why == "could not connect" || why.contains("while connecting") || why.contains("finding the clipboard service")
+            if !ok, !pairing, c.job.attempt == 1, let id = freshId(c.job.dev), id != c.job.id {
+                jobs.append(Job(dev: c.job.dev, id: id, chunks: c.job.chunks, attempt: 2, onFail: c.job.onFail, urgent: c.job.urgent))
+                Log.write("clip: retrying \(c.job.dev) with its newest Bluetooth address")
+            } else if !ok, !pairing, c.job.attempt == 1, collision {
+                // Usually both devices connecting to each other at the same moment (a receipt going back while a clip
+                // still arrives): one quiet retry 1.5 s later before it counts as a failure.
+                let retry = Job(dev: c.job.dev, id: freshId(c.job.dev) ?? c.job.id, chunks: c.job.chunks, attempt: 2, onFail: c.job.onFail, urgent: c.job.urgent)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in self?.jobs.append(retry); self?.nextJob() }
+            } else {
+                if let line = health.report(c.job.dev, ok: ok, pairing: pairing, now: Date()) { Log.write(line) }
+                if !ok { c.job.onFail?() }
             }
         }
         current = nil
@@ -534,6 +562,16 @@ final class ClipSync {
     private var lastChange = NSPasteboard.general.changeCount
     private var ownWrite = -1
     private var seen: [String] = []
+    private var ackedAt: [String: Date] = [:]
+    /// True when a receipt for this clip may go out again (none in the last 3 s). Called under no lock.
+    private func receiptDue(_ id: String) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        let now = Date()
+        if let at = ackedAt[id], now.timeIntervalSince(at) < 3 { return false }
+        ackedAt[id] = now
+        if ackedAt.count > 200 { ackedAt = ackedAt.filter { now.timeIntervalSince($0.value) < 60 } }
+        return true
+    }
     private let lock = NSLock()
     static let maxText = 1024 * 1024
     static let maxImage = 10 * 1024 * 1024
@@ -585,19 +623,26 @@ final class ClipSync {
     @discardableResult
     private func deliver(_ frame: Data, kind: String, to only: Set<String>?) -> [String] {
         let skip = Set(cfg.clipExclude)
-        func wanted(_ d: String) -> Bool { only.map { $0.contains(d) } ?? !skip.contains(d) }
-        let wifi = wifiPeers().filter { wanted($0.dev) }.map(\.host)
+        func wanted(_ d: String) -> Bool { d != cfg.deviceName && (only.map { $0.contains(d) } ?? !skip.contains(d)) }
+        let wifiAll = wifiPeers()
+        let now = Date()
+        let bleAll = blePeers().filter { ble.health.usable($0.dev, now: now) }
+        let names = Set(wifiAll.map(\.dev)).union(blePeers().map(\.dev)).filter(wanted)
+        let route = ClipRoute.plan(kind: kind, size: frame.count, mode: cfg.clipTransport, wanted: names,
+                                   ble: Set(bleAll.map(\.dev)), wifi: Set(wifiAll.map(\.dev)), maxBle: ClipBle.maxFrame)
         var links: [String] = []
-        var bleCarries = false
-        if kind != "image", cfg.clipTransport != "wifi", frame.count <= ClipBle.maxFrame {
-            let peers = blePeers().filter { wanted($0.dev) }
-            if !peers.isEmpty { ble.send(frame, to: peers); links.append("Bluetooth"); bleCarries = true }
+        if !route.ble.isEmpty {
+            // Bluetooth first; a device it cannot reach gets the same frame over Wi-Fi (the copies are recognised by id).
+            let mode = cfg.clipTransport
+            ble.send(frame, to: bleAll.filter { route.ble.contains($0.dev) }, first: kind == "text" || kind == "link") { [weak self] dev in
+                guard let self, mode != "ble" else { return }
+                DispatchQueue.main.async { for p in self.wifiPeers() where p.dev == dev { self.tcp.send(frame, to: p.host) } }
+            }
+            links.append("Bluetooth")
         }
-        // Wi-Fi as well, unless "Bluetooth" is chosen and Bluetooth can carry this (images and over 64 KB cannot).
-        if cfg.clipTransport != "ble" || !bleCarries {
-            for h in wifi { tcp.send(frame, to: h) }
-            if !wifi.isEmpty { links.append("Wi-Fi") }
-        }
+        let hosts = wifiAll.filter { route.wifi.contains($0.dev) }.map(\.host)
+        for h in hosts { tcp.send(frame, to: h) }
+        if !hosts.isEmpty { links.append("Wi-Fi") }
         return links
     }
 
@@ -657,7 +702,7 @@ final class ClipSync {
         sendControl(kind: "ack", data: Data(item.id.utf8), to: item.dev)
         onRecord?(ClipRecent(clipId: item.id, sent: false, dev: DeviceName.pretty(item.dev), kind: "file", text: dest.lastPathComponent))
         onEvent?("Received \(dest.lastPathComponent)")
-        Notifier.post("\(dest.lastPathComponent) from \(DeviceName.pretty(item.dev))", "Saved in Downloads")
+        Notifier.post("\(dest.lastPathComponent) from \(DeviceName.pretty(item.dev))", "Saved in Downloads. Click to show it in Finder.", file: dest)
     }
 
     /// Opens a link on another device ("continue on"): http and https only.
@@ -760,6 +805,12 @@ final class ClipSync {
 
     private func receive(_ frame: Data, via: String) {
         guard let item = ClipCodec.decode(frame, secret: cfg.secret) else { return }
+        // A signed message that came over Bluetooth proves the encrypted link to that device works (it was paired
+        // again), so its Bluetooth wait ends at once.
+        if via == "Bluetooth", item.dev != cfg.deviceName, ble.health.needsPairing(item.dev) || !ble.health.usable(item.dev, now: Date()) {
+            ble.health.paired(item.dev)
+            Log.write("clip: Bluetooth from \(item.dev) works, sending to it over Bluetooth again")
+        }
         // Receipts and diagnostics work whatever the clipboard settings; clips only when receiving is on.
         let content = item.kind == "text" || item.kind == "image" || item.kind == "link"
         guard !content || (cfg.clipSync && cfg.clipReceive && !paused) else { return }
@@ -774,7 +825,9 @@ final class ClipSync {
         lock.unlock()
         // A second copy (the other link, or a retry because the first receipt was lost) is confirmed again.
         if dup {
-            if content { DispatchQueue.main.async { self.sendControl(kind: "ack", data: Data(item.id.utf8), to: item.dev) } }
+            // At most one receipt per clip every 3 s: on 2026-11-08 one clip arrived over and over during a stuck
+            // Bluetooth write, and a receipt for every copy built up 1,400 queued sends.
+            if content, receiptDue(item.id) { DispatchQueue.main.async { self.sendControl(kind: "ack", data: Data(item.id.utf8), to: item.dev) } }
             return
         }
         DispatchQueue.main.async {

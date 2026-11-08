@@ -90,7 +90,6 @@ enum BudsProtocol {
 
     static func noiseCommand(_ mode: String) -> [UInt8] { encode(idNoise, [UInt8(max(0, noiseModes.firstIndex(of: mode) ?? 0))]) }
     static func eqCommand(_ preset: String) -> [UInt8] { encode(idEqualizer, [UInt8(max(0, eqPresets.firstIndex(of: preset) ?? 0))]) }
-    static func spatialCommand(_ on: Bool) -> [UInt8] { encode(idSpatial, [on ? 1 : 0]) }
     /// Quick connect is inverted on the wire: 0 means on.
     static func seamlessCommand(_ on: Bool) -> [UInt8] { encode(idSeamless, [on ? 0 : 1]) }
     static func muteCommand(_ l: Bool, _ r: Bool) -> [UInt8] { encode(idMute, [l ? 1 : 0, r ? 1 : 0]) }
@@ -254,7 +253,6 @@ final class BudsWear: NSObject, IOBluetoothRFCOMMChannelDelegate {
 
     func setNoise(_ m: String) { if send(BudsProtocol.noiseCommand(m)) { onUserChoice?("noise", m) } }
     func setEq(_ p: String) { if send(BudsProtocol.eqCommand(p)) { onUserChoice?("eq", p) } }
-    func setSpatial(_ on: Bool) { send(BudsProtocol.spatialCommand(on)) }
     func setSeamless(_ on: Bool) { send(BudsProtocol.seamlessCommand(on)) }
     func setTouch(_ on: Bool) { send(BudsProtocol.touchCommand(on, state)) }
 
@@ -323,10 +321,13 @@ final class BudsWear: NSObject, IOBluetoothRFCOMMChannelDelegate {
             crc = BudsProtocol.CrcStats()
             status = "connected"
             Log.write("buds: wear channel open")
-            // Separate settings per device: this Mac's own noise control and equalizer, once the Buds answer.
+            // Separate settings per device: this Mac's own noise control and equalizer, once it has held the Buds 5 s.
+            // A stray connection of a second or two (the Buds reconnecting by themselves during a handoff) must not
+            // change them for the device that is taking them.
             let own = ownSettings()
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
-                guard let self else { return }
+            let opened = rfcommChannel
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
+                guard let self, let opened, self.channel === opened else { return }
                 if let n = own.noise { self.send(BudsProtocol.noiseCommand(n)); Log.write("buds: applied this Mac's noise control \(n)") }
                 if let e = own.eq { self.send(BudsProtocol.eqCommand(e)); Log.write("buds: applied this Mac's equalizer \(e)") }
             }

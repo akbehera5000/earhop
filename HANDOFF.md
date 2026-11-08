@@ -253,10 +253,61 @@ Mac with Buds: if the channel is not open, ear is assumed `both`. The channel cl
     (SettingsSync, BatteryAlerts), attention (`att` in the status, core rules on both platforms), sleep timer,
     earhop:// and AppleScript (EarHop.sdef, Scripting.swift), AutomationReceiver. Found: tests/run.sh piped the Mac
     self test into tail, so its failure never stopped the run; now checked with pipefail and the exact last line.
+* **2026-11-08, 360 Audio and head tracking removed again (both apps).** The Buds do not render 360 Audio; the playing
+    device must, and only Samsung devices do. A Mac renderer was tried (macOS audio tap, then the BlackHole virtual
+    device, rendered with AVAudioEnvironmentNode and steered by the Buds' motion stream, message 194 and 195). On this
+    Mac both captures stalled inside coreaudiod: the tap gave no callbacks, BlackHole's AudioDeviceStart failed with a
+    Mach IPC error and the cleanup call never returned, which froze EarHop's main thread and stopped switching. The
+    test also left the Mac's output on BlackHole (no sound). The owner asked to remove the feature from all apps. Left
+    in: reading the spatial flag in the Buds status (log only) and `OutputRestore` at Mac launch, which puts the output
+    back once if the saved key `spatialRestoreOutputUID` shows it was left on BlackHole. Do not add system audio
+    capture back without a way to time out calls into coreaudiod.
+
+* **2026-11-08, earbuds reconnecting by themselves to a third device.** Mac to phone sometimes went Mac, tab, phone.
+  Logs: the Mac released at 11:16:07.7, the tablet became owner at 11:16:12 with no claim of its own (the Buds
+  reconnected to it), the phone's connect then pulled them over at 11:16:17. The idle owner rule only lets go for
+  playback that started after `ownerSince`, and the phone had started before, so the tablet would have kept them if the
+  phone's connect had failed. Both cores now mark ownership that arrives without a claim in the last 30 s and within
+  15 s of a peer (or this device) letting go as `strayOwner`, and release it while idle if a fresh peer plays without
+  the earbuds. Manual connects stay: the device that lost the earbuds advertises `playing=0` (claim blocked).
+* **2026-11-08, settings sync echo.** `SettingsSync.merge` took remote values equal to ours whenever the converted
+  stamp was newer; clock offset errors made every round trip grow the stamp, so the 5 minute full broadcasts bounced
+  the same keys forever. Equal values are skipped now (`localValues`).
+* **2026-11-08, volume handover vs profile.** The handover ran 1.5 s after the profile and won; a stray 2 s owner sent
+  its volume. Profile wins; volume is reported after 5 s of ownership.
+* **2026-11-08, RootBt adapter null.** In `app_process` as root on the tablet both the system context's
+  BluetoothManager and `getDefaultAdapter()` return no adapter. Unsolved; it now prints "no Bluetooth adapter".
+
+* **2026-11-08, clipboard queue blocked by one device.** Android sent Bluetooth clips one device after the other on a
+  single thread; the Mac (bonded on one side only: the Mac listed the tablet, the tablet had no Mac) failed every
+  write after a 30 s wait, so the phone's copy waited behind it and the receipts expired. Now: a queue per device
+  (priority: text first), `BleHealth` backoff (pairing refusal 6 h or until a bond event or a Bluetooth message from
+  it), Wi-Fi as the per-device fallback, 10 s write wait when bonded.
+* **2026-11-08, phone and tablet cannot reach each other over the hotspot.** No ping either way (IPv4 or IPv6, ARP
+  incomplete on the tablet) while both reach the Mac. Not an app fault; their clips go over Bluetooth.
+* **2026-11-08, root toast.** Magisk shows a toast per `su` session; EarHop started one per noticed copy and per
+  switch (rootFirst). `RootShell` keeps one shell; `RootShell.btHelperWorks` probes `RootBt probe` once.
+* **2026-11-08, picture-in-picture.** Android 13 clears the clipboard 1 h after the last copy; the denied read it causes
+  looked like a copy, `ClipActivity` opened and the video app saw the user leaving. Clear skipped, and automatic
+  launches use FLAG_ACTIVITY_NO_USER_ACTION (`am start -f 0x10040000` as root).
+* **2026-11-08, scans withheld after a background restart.** Location "while in use" only: a service restarted by an
+  update had 0 scan results until the app was opened. `neverForLocation` on BLUETOOTH_SCAN.
+* **2026-11-08, receipt flood.** A clip delivered repeatedly to the phone during a 30 s stuck write produced one
+  receipt per copy; 1,440 sends drained at 10 per second. Receipts limited to one per clip per 3 s; queues capped at
+  30 control messages per device. (The Mac log has times but no dates: "Bluetooth off" lines at the same times were
+  from an earlier day, not part of this.)
+* **2026-11-08, no notice for received files on the Mac.** macOS had EarHop's notifications off, and the app had no
+  notification delegate or log of the permission. Now it logs "notifications: ..." at start, shows notifications also
+  while active, and a click on "file received" reveals the file. Sending from the Mac's Share menu was missing: a
+  sandboxed share extension (`mac/ShareExtension`) passes the file paths to EarHop through `earhop://send-files`.
+* **2026-11-08, false "needs pairing again" on the Mac.** Any Bluetooth write that timed out counted as a pairing
+  refusal and stopped Bluetooth tries to that device for 6 hours, although the phone had just worked over Bluetooth
+  (seen twice in 5 minutes; Bluetooth from the phone cleared it 2 to 30 s later). A timeout now means pairing only for a
+  device with no Bluetooth success since EarHop started (`BleHealth.knownGood`); otherwise it is an ordinary failure.
 
 ## 8. What is built (feature list)
 
-Both apps: handoff, call priority, safe mode, quiet hours, Wi-Fi list, volume profile per device, device priority editor, handoff history with undo, ignored and preferred apps (Android, needs notification access), Wi-Fi/BLE/mDNS transports, onboarding wizard, theme and accent colours, accessibility labels, earbud profile switch (AirPods or Galaxy Buds2 Pro), AirPods battery and case battery, Galaxy Buds controls (noise, equalizer, 360 audio, touch, quick connect, safe find my Buds). Android only: quick settings tiles Take and Release, home screen widget, long press app shortcuts, glass UI with AMOLED black dark mode, optional root. Mac only: menu bar battery, global hotkey (Control Option Command E), Copy log button, launch at login.
+Both apps: handoff, call priority, safe mode, quiet hours, Wi-Fi list, volume profile per device, device priority editor, handoff history with undo, ignored and preferred apps (Android, needs notification access), Wi-Fi/BLE/mDNS transports, onboarding wizard, theme and accent colours, accessibility labels, earbud profile switch (AirPods or Galaxy Buds2 Pro), AirPods battery and case battery, Galaxy Buds controls (noise, equalizer, touch, quick connect, safe find my Buds). Android only: quick settings tiles Take and Release, home screen widget, long press app shortcuts, glass UI with AMOLED black dark mode, optional root. Mac only: menu bar battery, global hotkey (Control Option Command E), Copy log button, launch at login.
 
 ## 9. Known problems right now (the reason for this brief)
 

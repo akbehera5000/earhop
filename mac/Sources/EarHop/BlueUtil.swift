@@ -36,14 +36,31 @@ struct BlueUtil {
         if d.isConnected() { return true }
         if BlueUtil.pairedDevice(address)?.isConnected() ?? false { return true }
         let audio = BlueUtil.audioConnected(address)
+        BlueUtil.stateLock.lock(); defer { BlueUtil.stateLock.unlock() }
         if audio != BlueUtil.lastAudioOnly {
             BlueUtil.lastAudioOnly = audio
+            BlueUtil.audioOnlySince = audio ? Date() : nil
+            BlueUtil.disagreeLogged = false
             if audio { Log.write("connect: IOBluetooth says not connected but the earbuds' audio device is present; counting them as connected") }
+        } else if audio, let since = BlueUtil.audioOnlySince, Date().timeIntervalSince(since) > 5, !BlueUtil.disagreeLogged {
+            // Rechecked after 5 s (fix 7): still only the audio device says so. Logged once with what the others report,
+            // so a wrong "owner" shows up in the log.
+            BlueUtil.disagreeLogged = true
+            Log.write("connect: after 5 s IOBluetooth still says not connected while the audio device is alive\(BlueUtil.peerOwners().map { "; \($0) reports it has the earbuds" } ?? "")")
         }
         return audio
     }
 
     private static var lastAudioOnly = false
+    private static let stateLock = NSLock()
+    private static var audioOnlySince: Date?
+    private static var disagreeLogged = false
+    /// The other devices that report having the earbuds, for the disagreement line (set by the app from the main
+    /// thread, read from the claim thread, hence the lock).
+    private static var holders: String?
+    private static let holdersLock = NSLock()
+    static func setPeerOwners(_ v: String?) { holdersLock.lock(); holders = v; holdersLock.unlock() }
+    static func peerOwners() -> String? { holdersLock.lock(); defer { holdersLock.unlock() }; return holders }
 
     /// True when CoreAudio lists a Bluetooth audio device for this address (present exactly while its audio is connected).
     static func audioConnected(_ address: String) -> Bool {
@@ -67,7 +84,15 @@ struct BlueUtil {
             var uid: Unmanaged<CFString>?
             var uz = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
             guard AudioObjectGetPropertyData(id, &up, 0, nil, &uz, &uid) == noErr, let s = uid?.takeRetainedValue() as String? else { continue }
-            if s.lowercased().filter({ $0.isHexDigit }).contains(want) { return true }
+            guard s.lowercased().filter({ $0.isHexDigit }).contains(want) else { continue }
+            // A device that is still listed but no longer alive is the moment after the earbuds left (fix 7): it does
+            // not count, or the Mac would think it still has them.
+            var al = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyDeviceIsAlive, mScope: kAudioObjectPropertyScopeGlobal,
+                                                mElement: kAudioObjectPropertyElementMain)
+            var alive: UInt32 = 1
+            var az = UInt32(MemoryLayout<UInt32>.size)
+            if AudioObjectGetPropertyData(id, &al, 0, nil, &az, &alive) == noErr, alive == 0 { continue }
+            return true
         }
         return false
     }

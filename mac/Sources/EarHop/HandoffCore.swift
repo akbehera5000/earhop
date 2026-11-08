@@ -176,6 +176,12 @@ final class HandoffCore {
     private var yieldedForCall: String?
     private var gateLoggedAt = Date.distantPast
     private var inCallPhase = false
+    /// The earbuds reconnect by themselves to a device they know when the owner lets go. If that happens here while
+    /// another device is taking them, this device did not ask for them and gives them up at once.
+    private var claimStartedAt = Date.distantPast
+    private var strayOwner = false
+    private var peerOwners = Set<String>()
+    private var peerLetGoAt = Date.distantPast
 
     init(settings: HandoffSettings) { self.settings = settings }
 
@@ -193,6 +199,7 @@ final class HandoffCore {
     private func startClaim(_ reason: String, manual: Bool, _ now: Date) -> [HandoffAction] {
         guard pending == nil else { return [] }
         lastHandoff = now
+        claimStartedAt = now
         if settings.live { pending = .claim }
         return [.claim(reason: reason, manual: manual)]
     }
@@ -274,6 +281,15 @@ final class HandoffCore {
         if i.ear.ear == .none { if earOutSince == nil { earOutSince = now } } else { earOutSince = nil }
         if i.owner { if ownerSince == nil { ownerSince = now } } else { ownerSince = nil }
         let fresh = i.peers.filter { now.timeIntervalSince($0.seenAt) < 5 }
+        // A fresh device that had the earbuds a tick ago and has them no more let go of them just now.
+        let ownersNow = Set(fresh.filter(\.owner).map(\.name))
+        if peerOwners.subtracting(ownersNow).contains(where: { n in fresh.contains { $0.name == n } }) { peerLetGoAt = now }
+        peerOwners = ownersNow
+        if i.owner && !prevOwner {
+            let asked = pending == .claim || now.timeIntervalSince(claimStartedAt) < 30
+            let handoffJustNow = now.timeIntervalSince(peerLetGoAt) < 15 || now.timeIntervalSince(lastReleaseAt) < 15
+            strayOwner = !asked && handoffJustNow
+        } else if !i.owner { strayOwner = false }
         // Safe mode is a pause, not a stop: it ends after safeModeSeconds, or as soon as some device has the earbuds,
         // which shows they work again (they were often just in the case while a call tried to take them).
         if safeMode, now.timeIntervalSince(safeSince) >= settings.safeModeSeconds || i.owner || fresh.contains(where: { $0.owner }) {
@@ -391,6 +407,14 @@ final class HandoffCore {
             // Another device started after this one: pause first, then let go, so the two never stream together.
             out += pauseBeforeRelease("\(taker.name) started playing", now)
             out += startRelease("\(taker.name) started playing", now)
+        } else if i.owner, strayOwner, pending == nil, !i.playing, let os = ownerSince, now.timeIntervalSince(os) < 20,
+                  let taker = fresh.first(where: { p in
+                      !p.owner && p.playing && p.ear != .none && (p.playingSince.map { now.timeIntervalSince($0) >= relNeed } ?? false)
+                  }) {
+            // The earbuds came here by themselves in the middle of a handoff (seen with Galaxy Buds on 2026-11-08: the
+            // Mac let go for the phone and the Buds reconnected to the idle tablet first). Hand them on at once.
+            strayOwner = false
+            out += startRelease("the earbuds came here by themselves while \(taker.name) was taking them", now)
         } else if i.owner, cooled, pending == nil, !i.playing, now.timeIntervalSince(lastLocalPlayingAt) >= settings.quiet,
                   let taker = fresh.first(where: { p in
                       guard !p.owner, p.playing, p.ear != .none, let since = p.playingSince else { return false }

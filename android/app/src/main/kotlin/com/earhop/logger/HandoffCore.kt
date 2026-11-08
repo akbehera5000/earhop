@@ -85,6 +85,14 @@ class HandoffCore(var settings: HandoffSettings) {
     private var yieldedForCall: String? = null
     private var gateLoggedAt = -1_000_000L
     private var inCallPhase = false
+    /**
+     * The earbuds reconnect by themselves to a device they know when the owner lets go. If that happens here while
+     * another device is taking them, this device did not ask for them and gives them up at once.
+     */
+    private var claimStartedAt = -1_000_000L
+    private var strayOwner = false
+    private var peerOwners = setOf<String>()
+    private var peerLetGoAt = -1_000_000L
 
     private fun prio(n: String) = settings.priority.indexOf(n).let { if (it < 0) 99 else it }
     private fun earIn(r: EarReading) = r.ear == "both" || r.ear == "one" || (!settings.requireEar && r.ear == "unknown")
@@ -97,6 +105,7 @@ class HandoffCore(var settings: HandoffSettings) {
     private fun startClaim(reason: String, manual: Boolean, now: Long): List<HandoffAction> {
         if (pending != null) return emptyList()
         lastHandoff = now
+        claimStartedAt = now
         if (settings.live) pending = Pending.CLAIM
         return listOf(HandoffAction.Claim(reason, manual))
     }
@@ -165,6 +174,15 @@ class HandoffCore(var settings: HandoffSettings) {
             if (i.ear.ear == "none") { if (earOutSince == 0L) earOutSince = now } else earOutSince = 0L
             if (i.owner) { if (ownerSince == 0L) ownerSince = now } else ownerSince = 0L
             val fresh = i.peers.filter { now - it.seenAt < 5000 }
+            // A fresh device that had the earbuds a tick ago and has them no more let go of them just now.
+            val ownersNow = fresh.filter { it.owner }.map { it.name }.toSet()
+            if ((peerOwners - ownersNow).any { n -> fresh.any { it.name == n } }) peerLetGoAt = now
+            peerOwners = ownersNow
+            if (i.owner && !prevOwner) {
+                val asked = pending == Pending.CLAIM || now - claimStartedAt < 30_000
+                val handoffJustNow = now - peerLetGoAt < 15_000 || now - lastReleaseAt < 15_000
+                strayOwner = !asked && handoffJustNow
+            } else if (!i.owner) strayOwner = false
             // Safe mode is a pause, not a stop: it ends after safeModeMs, or as soon as some device has the earbuds,
             // which shows they work again (they were often just in the case while a call tried to take them).
             if (safeMode && (now - safeSince >= settings.safeModeMs || i.owner || fresh.any { it.owner })) {
@@ -268,6 +286,13 @@ class HandoffCore(var settings: HandoffSettings) {
                     out += pauseBeforeRelease("${taker.name} started playing", now)
                     out += startRelease("${taker.name} started playing", now)
                 }
+            } else if (i.owner && strayOwner && pending == null && !i.playing && ownerSince != 0L && now - ownerSince < 20_000 &&
+                fresh.any { !it.owner && it.playing && it.ear != "none" && it.playingSince != 0L && now - it.playingSince >= relNeed }) {
+                // The earbuds came here by themselves in the middle of a handoff (seen with Galaxy Buds on 2026-11-08: the
+                // Mac let go for the phone and the Buds reconnected to the idle tablet first). Hand them on at once.
+                val taker = fresh.first { !it.owner && it.playing && it.ear != "none" && it.playingSince != 0L && now - it.playingSince >= relNeed }
+                strayOwner = false
+                out += startRelease("the earbuds came here by themselves while ${taker.name} was taking them", now)
             } else if (i.owner && cooled && pending == null && !i.playing && now - lastLocalPlayingAt >= settings.quietMs) {
                 // Audio that was already playing when this device got the earbuds is not a new start.
                 val taker = fresh.firstOrNull {

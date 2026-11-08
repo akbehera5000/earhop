@@ -38,30 +38,26 @@ struct PopoverView: View {
                 .background(GeometryReader { g in Color.clear.preference(key: ContentHeightKey.self, value: g.size.height) })
         }
         .onPreferenceChange(ContentHeightKey.self) { contentHeight = $0 }
-        .frame(width: 360, height: min(contentHeight, maxHeight))
+        .frame(width: 340, height: min(contentHeight, maxHeight))
         .tint(accent)
     }
 
+    /// Compact: the earbuds, sound (Buds here), switching and clipboard, devices. Everything else is in Settings.
     private var content: some View {
         GlassGroup {
-            VStack(spacing: 12) {
-                header
+            VStack(spacing: 10) {
+                topBar
                 banners
                 hero
-                if state.cfg.isBuds, state.budsConnected, let link = state.budsLink { noisePicker(link) }
-                actions
-                connection
-                ClipCard(state: state)
-                if !state.peers.isEmpty { devices }
-                if !state.history.isEmpty { timeline }
-                diagnostics
-                footer
+                earbudsCard
+                HStack(spacing: 10) { switchingTile; clipTile }
+                if !state.peers.isEmpty { devicesRow }
             }
         }
-        .padding(14)
+        .padding(12)
     }
 
-    // MARK: header
+    // MARK: top bar
 
     /// "auto", or a pair chosen by hand (which turns automatic detection off).
     private var earbudsChoice: Binding<String> {
@@ -72,20 +68,42 @@ struct PopoverView: View {
         })
     }
 
-    private var header: some View {
+    private var topBar: some View {
         HStack(spacing: 10) {
-            Picker("Earbuds", selection: earbudsChoice) {
-                Text("Auto").tag("auto"); Text("AirPods").tag("airpods"); Text("Buds").tag("buds")
+            Image(systemName: state.cfg.isBuds ? "earbuds" : "airpodspro")
+                .font(.title3).foregroundStyle(accent).frame(width: 30, height: 30)
+                .background(Circle().fill(accent.opacity(0.15)))
+            VStack(alignment: .leading, spacing: 1) {
+                Text(state.cfg.isBuds ? "Galaxy Buds2 Pro" : "AirPods Pro 2").font(.headline)
+                Text(whereText).font(.caption).foregroundStyle(.secondary)
             }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .help("Auto follows the earbuds in use: the pair connected to this Mac, or the pair the device holding them reports.")
-            .accessibilityLabel("Active earbuds")
-            Toggle("Live", isOn: $state.cfg.liveMode)
-                .toggleStyle(.switch)
-                .controlSize(.small)
-                .help("Live: act on handoff decisions. Off: dry run, log only.")
+            .accessibilityElement(children: .combine)
+            Spacer(minLength: 6)
+            Text(stateWord)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(state.safeMode ? .orange : (state.owner || switching ? accent : .primary))
+                .padding(.horizontal, 9).padding(.vertical, 4)
+                .glassCapsule()
+                .contentTransition(.opacity)
+            Menu {
+                Picker("Earbuds", selection: earbudsChoice) {
+                    Text("Automatic").tag("auto"); Text("AirPods").tag("airpods"); Text("Galaxy Buds").tag("buds")
+                }
+                .pickerStyle(.inline)
+                Toggle("Live (act on decisions)", isOn: $state.cfg.liveMode)
+                Divider()
+                if let last = state.history.first(where: { $0.kind == .claim || $0.kind == .release }), !last.dry {
+                    Button("Undo: \(last.text)") { state.onUndo?() }
+                }
+                Button("Settings…") { state.onOpenSettings?() }.keyboardShortcut(",", modifiers: .command)
+                Button("Copy log") { Log.copyToPasteboard() }
+                Divider()
+                Button("Quit EarHop") { NSApp.terminate(nil) }.keyboardShortcut("q")
+            } label: { Image(systemName: "ellipsis.circle").font(.title3) }
+                .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+                .accessibilityLabel("More: earbuds, live mode, settings, quit")
         }
+        .padding(.horizontal, 4)
     }
 
     @ViewBuilder private var banners: some View {
@@ -101,15 +119,11 @@ struct PopoverView: View {
             banner("sparkles", accent, "Connect your \(state.cfg.earbudsName) to this Mac, then let EarHop find them.", "Detect") { state.onDetect?() }
         }
         ForEach(state.duplicates.filter { Date().timeIntervalSince($0.value) < 180 }.map { $0.key }.sorted(), id: \.self) { dev in
-            banner("person.2.slash", .orange,
-                   "Two devices are both named \(dev), so EarHop mixes them up. In the EarHop app on the tablet, set the name to tab (and on the phone to phone), then press Start again.", nil) {}
+            banner("person.2.slash", .orange, "Two devices are both named \(dev). Give each device its own name.", nil) {}
         }
         ForEach(state.rejected.filter { Date().timeIntervalSince($0.value.at) < 180 }.map { $0.key }.sorted(), id: \.self) { dev in
-            let clock = state.rejected[dev]?.reason == "clock"
             banner("lock.trianglebadge.exclamationmark.fill", .orange,
-                   clock ? "\(DeviceName.pretty(dev)) is ignored: its clock differs from this Mac by more than 30 seconds. Set both to automatic time."
-                         : "\(DeviceName.pretty(dev)) uses a different secret, so it is ignored. Pair it again with the QR code.",
-                   clock ? nil : "Pair") { state.onOpenSettings?() }
+                   "\(DeviceName.pretty(dev)) uses a different secret, so it is ignored. Pair it again with the QR code.", "Pair") { state.onOpenSettings?() }
         }
         if !state.cfg.liveMode {
             banner("eye", .secondary, "Dry run: EarHop only logs what it would do.", "Go live") { state.cfg.liveMode = true }
@@ -138,6 +152,15 @@ struct PopoverView: View {
             m.right = .init(battery: live ? b.battR : -1, place: place(live ? b.placeR : nil, 1), charging: live && b.chargeR)
             m.caseLevel = live ? b.battCase : -1
             m.caseCharging = live && b.chargeCase
+            // Connected to another device: the levels it shares, and the wear state from its status.
+            if !live, let r = state.remoteBattery, r.fresh {
+                let ear = state.peers.first { $0.name == state.holder }?.ear ?? .unknown
+                let worn = ear == .both ? "wearing" : ear == .none ? "idle" : "unknown"
+                m.left = .init(battery: r.l, place: worn, charging: r.cl)
+                m.right = .init(battery: r.r, place: worn, charging: r.cr)
+                m.caseLevel = r.c
+                m.caseCharging = r.cc
+            }
         } else {
             m.left = .init(battery: state.battery?.0 ?? -1, place: place(nil, 0))
             m.right = .init(battery: state.battery?.1 ?? -1, place: place(nil, 1))
@@ -147,33 +170,19 @@ struct PopoverView: View {
     }
 
     private var hero: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .firstTextBaseline) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(state.cfg.isBuds ? "Galaxy Buds2 Pro" : "AirPods Pro 2").font(.headline)
-                    Text(whereText).font(.subheadline).foregroundStyle(.secondary)
-                }
-                Spacer(minLength: 8)
-                Text(stateWord)
-                    .font(.system(.title3, design: .rounded).weight(.semibold))
-                    .foregroundStyle(state.safeMode ? .orange : (state.owner || switching ? accent : .primary))
-                    .contentTransition(.opacity)
-            }
-            .accessibilityElement(children: .combine)
-            .accessibilityLabel("\(state.cfg.earbudsName), \(whereText), \(stateWord)")
-
-            BudsPicture(model: budsModel, tint: accent)
-
+        VStack(spacing: 8) {
+            BudsPicture(model: budsModel, tint: accent, height: 132)
             if switching { stages }
             if let f = state.lastFailure, !switching {
                 note("exclamationmark.circle.fill", .orange, "Last switch failed: \(f).")
             } else if let h = state.holdReason, !state.owner, !switching {
                 note("pause.circle", .secondary, "Not switching: \(h).")
             }
+            actions
         }
-        .padding(14)
-        .glassCard()
-        .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: switching)
+        .padding(12)
+        .glassCard(cornerRadius: 22)
+        .animation(reduceMotion ? nil : .spring(response: 0.35, dampingFraction: 0.7), value: switching)
     }
 
     /// The four handoff stages, lit up to the current one. Success is only shown once ownership is verified.
@@ -194,23 +203,47 @@ struct PopoverView: View {
     }
 
 
-    private func noisePicker(_ link: BudsWear) -> some View {
-        Picker("Noise control", selection: Binding(get: { state.buds.noise }, set: { link.setNoise($0) })) {
-            Text("Off").tag("off"); Text("Noise cancelling").tag("anc"); Text("Ambient").tag("ambient")
-            if !["off", "anc", "ambient"].contains(state.buds.noise) { Text("-").tag(state.buds.noise).disabled(true) }
+    // MARK: earbuds
+
+    /// Galaxy Buds here: noise control (three round buttons) and the equalizer. Always: the ear and call options.
+    private var earbudsCard: some View {
+        let link = state.budsLink
+        let budsHere = state.cfg.isBuds && state.budsConnected
+        return VStack(alignment: .leading, spacing: 10) {
+            if budsHere {
+                NoiseButtons(mode: state.buds.noise, accent: accent) { link?.setNoise($0) }
+                Text("Equalizer").font(.caption).foregroundStyle(.secondary).padding(.top, 2)
+                EqButtons(preset: state.buds.eq, accent: accent) { link?.setEq($0) }
+                Divider()
+            }
+            optionRow("Pause when an earbud comes out", $state.cfg.pauseWhenOneOut)
+            optionRow("Play on the speakers when they are out", $state.cfg.speakerFallback)
+            optionRow("Calls and meetings come first", $state.cfg.detectCalls)
+            if budsHere, let v = state.buds.touchOn {
+                optionRow("Touch controls", Binding(get: { v }, set: { link?.setTouch($0) }))
+            }
         }
-        .pickerStyle(.segmented)
-        .labelsHidden()
-        .accessibilityLabel("Noise control")
+        .toggleStyle(.switch).controlSize(.small)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(12)
+        .glassCard(cornerRadius: 22)
+    }
+
+    /// A label on the left and its switch lined up on the right.
+    private func optionRow(_ title: String, _ value: Binding<Bool>) -> some View {
+        HStack {
+            Text(title).font(.callout)
+            Spacer(minLength: 8)
+            Toggle(title, isOn: value).labelsHidden()
+        }
     }
 
     // MARK: actions
 
     private var actions: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 8) {
             Button { state.onTake?() } label: {
-                Label(state.owner ? "Connected here" : "Take \(state.cfg.earbudsShort)", systemImage: "arrow.down.circle.fill")
-                    .frame(maxWidth: .infinity)
+                Label(state.owner ? "Here" : "Take", systemImage: state.owner ? "checkmark.circle.fill" : "arrow.down.circle.fill").frame(maxWidth: .infinity)
             }
             .glassButton(prominent: true)
             .keyboardShortcut(.defaultAction)
@@ -233,119 +266,114 @@ struct PopoverView: View {
                 }
                 ForEach([15, 30, 45, 60, 90], id: \.self) { m in Button("In \(m) minutes") { state.onSleep?(m) } }
             } label: { Image(systemName: state.sleepUntil > Date() ? "moon.zzz.fill" : "moon.zzz") }
-                .menuStyle(.borderlessButton).fixedSize()
+                .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
                 .help(state.sleepUntil > Date() ? "Sleep timer: \(state.sleepUntil.formatted(date: .omitted, time: .shortened))" : "Sleep timer")
                 .accessibilityLabel("Sleep timer")
         }
-        .controlSize(.large)
+        .controlSize(.regular)
     }
 
-    private var connection: some View {
-        VStack(alignment: .leading, spacing: 8) {
+    // MARK: tiles
+
+    private var switchingTile: some View {
+        let on = state.cfg.autoSwitch && !state.switchPaused
+        return VStack(alignment: .leading, spacing: 6) {
             HStack {
-                Text("Earbud switching").font(.caption).foregroundStyle(.secondary)
-                if state.cfg.autoSwitch, state.switchPaused {
-                    Text("paused until \(state.switchPausedUntil.formatted(date: .omitted, time: .shortened))")
-                        .font(.caption2).padding(.horizontal, 6).padding(.vertical, 1).glassCapsule(tint: .orange)
-                }
-                Spacer()
+                Text("Switching").font(.callout.weight(.semibold))
+                Spacer(minLength: 2)
+                Toggle("Switching", isOn: $state.cfg.autoSwitch).toggleStyle(.switch).controlSize(.mini).labelsHidden()
             }
-            ConnectionControl(state: state)
-            HStack(spacing: 8) {
-                Toggle("Auto", isOn: $state.cfg.autoSwitch)
-                    .toggleStyle(.switch).controlSize(.mini)
-                    .help("Move the \(state.cfg.earbudsShort) automatically to the device that starts playing. Off: only Take and Release.")
-                Toggle("Calls", isOn: $state.cfg.detectCalls)
-                    .toggleStyle(.switch).controlSize(.mini)
-                    .help("A call on any device takes the \(state.cfg.earbudsShort)")
-                Toggle("Ear pause", isOn: $state.cfg.pauseWhenOneOut)
-                    .toggleStyle(.switch).controlSize(.mini)
-                    .help("Pause when you take an earbud out, resume when you put it back")
-                Spacer(minLength: 0)
+            Text(state.switchPaused ? "Paused until \(state.switchPausedUntil.formatted(date: .omitted, time: .shortened))"
+                 : (state.cfg.autoSwitch ? state.transport : "Off, Take and Release only"))
+                .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+            MethodPicker(title: "Switching link", value: $state.cfg.transport)
+            HStack {
+                Spacer()
                 PauseMenu(paused: state.switchPaused, what: "automatic switching") { until in
                     state.switchPausedUntil = until
                     state.onSwitchPause?(until)
                 }
             }
         }
+        .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(14)
-        .glassCard()
+        .background(RoundedRectangle(cornerRadius: 18).strokeBorder(on ? Color.green.opacity(0.8) : Color.secondary.opacity(0.35), lineWidth: 1.5))
+        .glassCard(cornerRadius: 18)
     }
 
-    private var devices: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Devices").font(.caption).foregroundStyle(.secondary)
-            ForEach(state.peers) { p in
-                HStack(spacing: 8) {
-                    Image(systemName: DeviceName.symbol(p.name)).frame(width: 22).foregroundStyle(p.owner ? accent : .secondary)
-                    Text(DeviceName.pretty(p.name)).fontWeight(.medium)
-                    if p.call { Image(systemName: "phone.fill").foregroundStyle(.green).accessibilityLabel("in a call") }
-                    Spacer()
-                    if p.owner { Text("has the earbuds").font(.caption).padding(.horizontal, 8).padding(.vertical, 2).glassCapsule(tint: accent) }
-                    Text(p.playing ? "Playing" : "Idle").font(.caption).foregroundStyle(p.playing ? .green : .secondary)
-                    Image(systemName: p.via == "ble" ? "dot.radiowaves.left.and.right" : "wifi")
-                        .font(.caption).foregroundStyle(p.age > 3 ? .orange : .secondary)
-                        .help(p.via == "ble" ? "Bluetooth LE, \(p.age) s ago" : "Wi-Fi, \(p.age) s ago")
+    private var clipTile: some View {
+        let on = state.cfg.clipSync && !state.clipPaused
+        let recent = Date().timeIntervalSince(state.clipAt) < 3600 && !state.clipStatus.isEmpty
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("Clipboard").font(.callout.weight(.semibold))
+                Spacer(minLength: 2)
+                Toggle("Clipboard sync", isOn: $state.cfg.clipSync).toggleStyle(.switch).controlSize(.mini).labelsHidden()
+            }
+            Text(state.clipPaused ? "Paused until \(state.clipPausedUntil.formatted(date: .omitted, time: .shortened))"
+                 : (!state.cfg.clipSync ? "Off" : (recent ? state.clipStatus : "Copies sync automatically")))
+                .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+            MethodPicker(title: "Clipboard link", value: $state.cfg.clipTransport)
+            HStack(spacing: 6) {
+                Button { state.onClipSend?() } label: { Image(systemName: "paperplane") }
+                    .buttonStyle(.plain).help("Send this Mac's clipboard now").disabled(!state.cfg.clipSync)
+                Menu {
+                    Button("Send files…") { pickFiles(to: nil) }
+                    ForEach(otherDevices, id: \.self) { d in Button("Send files to \(DeviceName.pretty(d))…") { pickFiles(to: d) } }
+                    Divider()
+                    ForEach(otherDevices, id: \.self) { d in
+                        Button("Open copied link on \(DeviceName.pretty(d))") {
+                            if let s = NSPasteboard.general.string(forType: .string) { state.onSendLink?(s.trimmingCharacters(in: .whitespacesAndNewlines), d) }
+                        }
+                    }
+                } label: { Image(systemName: "square.and.arrow.up") }
+                    .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+                    .help("Send files, or open the copied link on another device")
+                Spacer()
+                PauseMenu(paused: state.clipPaused, what: "clipboard sync") { until in
+                    state.clipPausedUntil = until
+                    state.onClipPause?(until)
                 }
+            }
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 18).strokeBorder(on ? Color.green.opacity(0.8) : Color.secondary.opacity(0.35), lineWidth: 1.5))
+        .glassCard(cornerRadius: 18)
+    }
+
+    private var otherDevices: [String] { state.peers.map(\.name).filter { $0 != state.cfg.deviceName }.sorted() }
+
+    private func pickFiles(to dev: String?) {
+        let p = NSOpenPanel()
+        p.allowsMultipleSelection = true
+        p.canChooseDirectories = false
+        p.prompt = "Send"
+        p.message = dev.map { "Send to \(DeviceName.pretty($0)) over Wi-Fi" } ?? "Send to your other devices over Wi-Fi"
+        NSApp.activate(ignoringOtherApps: true)
+        if p.runModal() == .OK, !p.urls.isEmpty { state.onSendFiles?(p.urls, dev) }
+    }
+
+    // MARK: devices
+
+    private var devicesRow: some View {
+        HStack(spacing: 10) {
+            ForEach(state.peers) { p in
+                HStack(spacing: 5) {
+                    Image(systemName: DeviceName.symbol(p.name)).font(.caption)
+                    Text(DeviceName.pretty(p.name)).font(.caption.weight(.medium)).lineLimit(1)
+                    if p.call { Image(systemName: "phone.fill").font(.caption2).foregroundStyle(.green) }
+                    else if p.playing { Image(systemName: "waveform").font(.caption2).foregroundStyle(.secondary) }
+                }
+                .padding(.horizontal, 9).padding(.vertical, 5)
+                .overlay(Capsule().strokeBorder(p.owner ? Color.green.opacity(0.8) : Color.clear, lineWidth: 1.2))
+                .glassCapsule()
+                .springy()
+                .help("\(DeviceName.pretty(p.name)): \(p.owner ? "has the earbuds, " : "")\(p.playing ? "playing" : "idle"), over \(p.via == "ble" ? "Bluetooth LE" : "Wi-Fi")")
                 .accessibilityElement(children: .combine)
             }
+            Spacer(minLength: 0)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(14)
-        .glassCard()
-    }
-
-    private var timeline: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("Recent").font(.caption).foregroundStyle(.secondary)
-            ForEach(state.history.filter { $0.kind != .peer }.prefix(4)) { e in
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    Image(systemName: symbol(e.kind)).font(.caption).foregroundStyle(color(e.kind)).frame(width: 16)
-                    Text(e.text).font(.caption).lineLimit(1).truncationMode(.tail)
-                    Spacer(minLength: 4)
-                    Text(e.date, style: .time).font(.caption2).foregroundStyle(.secondary)
-                }
-                .opacity(e.dry ? 0.6 : 1)
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(14)
-        .glassCard()
-    }
-
-    private var diagnostics: some View {
-        DisclosureGroup(isExpanded: Binding(get: { diagBox.value }, set: { diagBox.value = $0 })) {
-            VStack(spacing: 6) {
-                diag("State", state.phase.label)
-                diag("Ear source", "\(state.earReading.source), \(state.earReading.confidence.rawValue) confidence")
-                diag("This Mac", state.playing ? "playing (\(state.playingApps.map { $0.split(separator: ".").last.map(String.init) ?? $0 }.joined(separator: ", ")))" : "idle")
-                diag("Link", state.transport + (state.discovered.isEmpty ? "" : ", \(state.discovered.count) found"))
-                diag("Pause and play", MediaControl.mode)
-                if state.cfg.isBuds { diag("Buds channel", state.budsStatus) }
-            }
-            .padding(.top, 6)
-        } label: {
-            Label("Diagnostics", systemImage: "stethoscope").font(.callout)
-        }
-        .padding(.horizontal, 4)
-    }
-
-    private var footer: some View {
-        HStack(spacing: 14) {
-            if let last = state.history.first(where: { $0.kind == .claim || $0.kind == .release }), !last.dry {
-                Button { state.onUndo?() } label: { Label("Undo", systemImage: "arrow.uturn.backward") }
-                    .buttonStyle(.plain).help("Undo: \(last.text)")
-            }
-            Button { state.onOpenSettings?() } label: { Label("Settings", systemImage: "gearshape") }
-                .buttonStyle(.plain).keyboardShortcut(",", modifiers: .command)
-            Button { Log.copyToPasteboard() } label: { Label("Copy log", systemImage: "doc.on.doc") }
-                .buttonStyle(.plain).help("Copy the last 400 log lines")
-            Spacer()
-            Button("Quit") { NSApp.terminate(nil) }.buttonStyle(.plain).foregroundStyle(.secondary).keyboardShortcut("q")
-        }
-        .font(.callout)
-        .padding(.horizontal, 4)
     }
 
     // MARK: pieces
@@ -417,3 +445,174 @@ private struct ContentHeightKey: PreferenceKey {
     static var defaultValue: CGFloat = 0
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
 }
+
+/// Noise control as three round buttons on a line: Noise cancelling, Off, Ambient. The white highlight springs to the
+/// chosen one; each button sinks under the pointer and bounces back.
+struct NoiseButtons: View {
+    let mode: String
+    let accent: Color
+    let pick: (String) -> Void
+    @Namespace private var ns
+    private let items: [(String, String)] = [("anc", "Noise cancelling"), ("off", "Off"), ("ambient", "Ambient")]
+
+    var body: some View {
+        ZStack(alignment: .top) {
+            Capsule().fill(Color.secondary.opacity(0.35)).frame(height: 2).padding(.horizontal, 48).offset(y: 21)
+            HStack(spacing: 0) {
+                ForEach(items, id: \.0) { m, label in
+                    Button { pick(m) } label: {
+                        VStack(spacing: 6) {
+                            ZStack {
+                                // Solid, so the line behind does not show through.
+                                Circle().fill(Color(nsColor: .windowBackgroundColor))
+                                Circle().fill(Color.secondary.opacity(0.22))
+                                if mode == m {
+                                    Circle().fill(Color(nsColor: .labelColor).opacity(1))
+                                        .shadow(color: accent.opacity(0.6), radius: 8)
+                                        .matchedGeometryEffect(id: "pick", in: ns)
+                                }
+                                NoiseIcon(kind: m).foregroundStyle(mode == m ? Color(nsColor: .windowBackgroundColor) : Color.primary)
+                            }
+                            .frame(width: 44, height: 44)
+                            Text(label).font(.caption2).foregroundStyle(mode == m ? .primary : .secondary).lineLimit(1)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(SpringButtonStyle())
+                    .accessibilityLabel("\(label)\(mode == m ? ", selected" : "")")
+                }
+            }
+        }
+        .animation(.spring(response: 0.38, dampingFraction: 0.62), value: mode)
+    }
+}
+
+/// The six equalizer presets side by side, the same round buttons as the noise control. A custom preset made in
+/// Galaxy Wearable selects none and says so.
+struct EqButtons: View {
+    let preset: String
+    let accent: Color
+    let pick: (String) -> Void
+    @Namespace private var ns
+    static let items: [(String, String)] = [("off", "Off"), ("bass", "Bass"), ("soft", "Soft"),
+                                            ("dynamic", "Dynamic"), ("clear", "Clear"), ("treble", "Treble")]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 0) {
+                ForEach(EqButtons.items, id: \.0) { p, label in
+                    Button { pick(p) } label: {
+                        VStack(spacing: 5) {
+                            ZStack {
+                                Circle().fill(Color.secondary.opacity(0.22))
+                                if preset == p {
+                                    Circle().fill(Color(nsColor: .labelColor))
+                                        .shadow(color: accent.opacity(0.6), radius: 7)
+                                        .matchedGeometryEffect(id: "eq", in: ns)
+                                }
+                                EqIcon(preset: p).foregroundStyle(preset == p ? Color(nsColor: .windowBackgroundColor) : Color.primary)
+                            }
+                            .frame(width: 36, height: 36)
+                            Text(label).font(.caption2).foregroundStyle(preset == p ? .primary : .secondary).lineLimit(1)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(SpringButtonStyle())
+                    .accessibilityLabel("Equalizer \(label)\(preset == p ? ", selected" : "")")
+                }
+            }
+            if preset == "custom" {
+                Text("A custom equalizer from Galaxy Wearable is on.").font(.caption2).foregroundStyle(.secondary)
+            }
+        }
+        .animation(.spring(response: 0.38, dampingFraction: 0.62), value: preset)
+    }
+}
+
+/// Five small bars drawing the shape of each preset (low notes on the left).
+struct EqIcon: View {
+    let preset: String
+    private var heights: [CGFloat] {
+        switch preset {
+        case "bass": return [15, 12, 8, 6, 5]
+        case "soft": return [7, 10, 12, 10, 7]
+        case "dynamic": return [14, 8, 5, 8, 14]
+        case "clear": return [5, 8, 13, 11, 8]
+        case "treble": return [5, 6, 8, 12, 15]
+        default: return [7, 7, 7, 7, 7]
+        }
+    }
+    var body: some View {
+        HStack(alignment: .center, spacing: 2) {
+            ForEach(Array(heights.enumerated()), id: \.offset) { _, h in
+                Capsule().frame(width: 2.5, height: h)
+            }
+        }
+    }
+}
+
+/// The three noise icons: rings and a dot (cancelling), a small ring (off), a ring of dots (ambient).
+struct NoiseIcon: View {
+    let kind: String
+    var body: some View {
+        ZStack {
+            switch kind {
+            case "anc":
+                Circle().stroke(lineWidth: 2).frame(width: 22, height: 22)
+                Circle().frame(width: 8, height: 8)
+            case "off":
+                Circle().stroke(lineWidth: 2).frame(width: 16, height: 16)
+                Circle().frame(width: 6, height: 6)
+            default:
+                ForEach(0 ..< 8, id: \.self) { i in
+                    Circle().frame(width: 3, height: 3)
+                        .offset(x: 11 * cos(Double(i) * .pi / 4), y: 11 * sin(Double(i) * .pi / 4))
+                }
+                Circle().frame(width: 6, height: 6)
+            }
+        }
+    }
+}
+
+/// A button that sinks under the pointer and bounces back past its size.
+struct SpringButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.9 : 1)
+            .animation(.spring(response: 0.3, dampingFraction: 0.45), value: configuration.isPressed)
+    }
+}
+
+/// Cards and chips answer a press: they sink a little and spring back, without taking clicks from their controls.
+struct Springy: ViewModifier {
+    @GestureState private var pressed = false
+    func body(content: Content) -> some View {
+        content
+            .scaleEffect(pressed ? 0.975 : 1)
+            .animation(.spring(response: 0.32, dampingFraction: 0.5), value: pressed)
+            .simultaneousGesture(DragGesture(minimumDistance: 0).updating($pressed) { _, s, _ in s = true })
+    }
+}
+
+extension View {
+    func springy() -> some View { modifier(Springy()) }
+}
+
+
+/// How a feature travels: Bluetooth LE, both, or Wi-Fi.
+struct MethodPicker: View {
+    let title: String
+    @Binding var value: String
+    var body: some View {
+        Picker(title, selection: $value) {
+            Image(systemName: "dot.radiowaves.left.and.right").help("Bluetooth LE").tag("ble")
+            Text("Both").tag("both")
+            Image(systemName: "wifi").help("Wi-Fi").tag("wifi")
+        }
+        .pickerStyle(.segmented).labelsHidden().controlSize(.mini)
+        .accessibilityLabel(title)
+    }
+}
+

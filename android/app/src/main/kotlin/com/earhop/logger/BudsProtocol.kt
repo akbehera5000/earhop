@@ -121,7 +121,6 @@ object BudsProtocol {
 
     fun noiseCommand(mode: String) = encode(ID_NOISE, byteArrayOf(NOISE_MODES.indexOf(mode).coerceAtLeast(0).toByte()))
     fun eqCommand(preset: String) = encode(ID_EQUALIZER, byteArrayOf(EQ_PRESETS.indexOf(preset).coerceAtLeast(0).toByte()))
-    fun spatialCommand(on: Boolean) = encode(ID_SPATIAL, byteArrayOf(if (on) 1 else 0))
     /** Quick connect is inverted on the wire: 0 means on. */
     fun seamlessCommand(on: Boolean) = encode(ID_SEAMLESS, byteArrayOf(if (on) 0 else 1))
     fun muteCommand(left: Boolean, right: Boolean) = encode(ID_MUTE, byteArrayOf(if (left) 1 else 0, if (right) 1 else 0))

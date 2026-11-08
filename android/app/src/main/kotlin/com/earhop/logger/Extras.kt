@@ -26,9 +26,18 @@ object SettingsSync {
         "clipSkipPasswords" to ("clipSkipPasswords" to false), "sleepMinutes" to ("sleepMinutes" to 30),
     )
 
-    /** The changes to apply: keys whose remote stamp, in this clock, is newer than ours. Pure, unit tested. */
-    fun merge(local: Map<String, Long>, remote: Map<String, Pair<Any, Long>>, offsetMs: Long): Map<String, Pair<Any, Long>> =
-        remote.filter { (k, r) -> k in keys && r.second - offsetMs > (local[k] ?: 0L) }.mapValues { (_, r) -> Pair(r.first, r.second - offsetMs) }
+    /**
+     * The changes to apply: keys whose remote stamp, in this clock, is newer than ours and whose value differs from ours.
+     * An equal value is never taken: every device sends the whole set every 5 minutes and each conversion moves a stamp
+     * a little, so taking equal values made the same settings bounce between the devices forever, with stamps that kept
+     * growing until an old value could beat a real newer change. Pure, unit tested.
+     */
+    fun merge(local: Map<String, Long>, remote: Map<String, Pair<Any, Long>>, offsetMs: Long,
+              localValues: Map<String, Any> = emptyMap(), nowMs: Long = Long.MAX_VALUE / 2): Map<String, Pair<Any, Long>> =
+        // A stamp more than a minute in the future (a clock that jumped ahead) is refused: kept, it would beat every
+        // real change on every device until that time came.
+        remote.filter { (k, r) -> k in keys && localValues[k]?.toString() != r.first.toString() && r.second - offsetMs > (local[k] ?: 0L) &&
+            r.second - offsetMs <= nowMs + 60_000 }.mapValues { (_, r) -> Pair(r.first, r.second - offsetMs) }
 
     fun values(ctx: Context): Map<String, Any> {
         val p = ctx.getSharedPreferences("earhop", Context.MODE_PRIVATE)
@@ -81,7 +90,7 @@ class Extras(private val ctx: Context) {
     private val alerts = BatteryAlerts()
     private var lastBattKey = ""; private var lastBattAt = 0L; private var checkedAt = 0L
     private var remoteVol: Triple<String, Float, Long>? = null
-    private var lastVolSent = -1f; private var lastVolAt = 0L; private var wasOwner = false
+    private var lastVolSent = -1f; private var lastVolAt = 0L; private var wasOwner = false; private var ownerAt = 0L
     private var lastShared: Map<String, String> = emptyMap(); private var sharedAt = 0L; private var sharedPeers = setOf<String>()
     @Volatile private var remoteBattAt = 0L
 
@@ -98,7 +107,8 @@ class Extras(private val ctx: Context) {
             }
             "vol" -> text.toFloatOrNull()?.let { remoteVol = Triple(item.dev, it, System.currentTimeMillis()) }
             "settings" -> {
-                val apply = SettingsSync.merge(SettingsSync.stamps(ctx), SettingsSync.decode(item.data), ClockGuard.shared.offset(item.dev) ?: 0L)
+                val apply = SettingsSync.merge(SettingsSync.stamps(ctx), SettingsSync.decode(item.data), ClockGuard.shared.offset(item.dev) ?: 0L,
+                    SettingsSync.values(ctx), System.currentTimeMillis())
                 if (apply.isEmpty()) return
                 apply.forEach { (k, r) -> SettingsSync.apply(ctx, k, r.first, r.second) }
                 lastShared = SettingsSync.values(ctx).mapValues { it.value.toString() }
@@ -160,19 +170,27 @@ class Extras(private val ctx: Context) {
             }
     }
 
-    /** While this device has the earbuds it tells the others its volume; when they arrive here it takes the last one. */
+    /**
+     * While this device has the earbuds it tells the others its volume; when they arrive here it takes the last one.
+     * This device's own volume profile wins over the handover (they used to fight: the profile, then 1.5 s later the
+     * handover). A device reports only after holding the earbuds 5 s, so a stray connection of a second or two (the
+     * earbuds reconnecting by themselves during a handoff) does not set everyone's volume.
+     */
     fun volumeTick(owner: Boolean) {
         val am = ctx.getSystemService(Context.AUDIO_SERVICE) as AudioManager
         val max = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1)
         val rv = remoteVol
-        if (owner && !wasOwner && prefs.getBoolean("volumeHandover", true) && rv != null && System.currentTimeMillis() - rv.third < 600_000) {
+        val now0 = System.currentTimeMillis()
+        if (owner && !wasOwner) ownerAt = now0
+        if (owner && !wasOwner && prefs.getBoolean("volumeHandover", true) && !prefs.getBoolean("volumeOn", false) &&
+            rv != null && now0 - rv.third < 600_000) {
             android.os.Handler(ctx.mainLooper).postDelayed({
                 try { am.setStreamVolume(AudioManager.STREAM_MUSIC, Math.round(rv.second * max), 0) } catch (e: Exception) { }
                 EhLog.w("volume: set to ${(rv.second * 100).toInt()} %, as on ${rv.first}")
             }, 1500)
         }
         wasOwner = owner
-        if (!owner) return
+        if (!owner || now0 - ownerAt < 5000) return
         val v = am.getStreamVolume(AudioManager.STREAM_MUSIC).toFloat() / max
         val now = System.currentTimeMillis()
         if (Math.abs(v - lastVolSent) > 0.02f || now - lastVolAt > 60_000) {
@@ -238,7 +256,7 @@ class AutomationReceiver : BroadcastReceiver() {
             "com.earhop.logger.action.RELEASE" -> EhState.controller?.manual(false)
             "com.earhop.logger.action.SEND_TEXT" -> i.getStringExtra("text")?.let { ClipSync.sendClip(app, android.content.ClipData.newPlainText("Automation", it)) }
             "com.earhop.logger.action.SEND_CLIPBOARD" -> try {
-                app.startActivity(Intent(app, ClipActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                app.startActivity(Intent(app, ClipActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_NO_USER_ACTION))
             } catch (e: Exception) { EhLog.w("automation: Android blocked opening the send screen; use SEND_TEXT with %CLIP") }
             "com.earhop.logger.action.SLEEP" -> Extras.setSleep(app, i.getIntExtra("minutes", app.getSharedPreferences("earhop", Context.MODE_PRIVATE).getInt("sleepMinutes", 30)))
             "com.earhop.logger.action.SLEEP_CANCEL" -> Extras.setSleep(app, 0)

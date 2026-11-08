@@ -27,8 +27,14 @@ object RootBt {
             val at = Class.forName("android.app.ActivityThread")
             val thread = at.getMethod("systemMain").invoke(null)
             val ctx = at.getMethod("getSystemContext").invoke(thread) as Context
-            val bm = ctx.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
-            val adapter = bm.adapter
+            val bm = ctx.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
+            // On the tablet (2026-11-08) the system context's manager has no adapter: every root connect failed with a
+            // NullPointerException. The process-wide default adapter works there.
+            @Suppress("DEPRECATION")
+            val adapter = bm?.adapter ?: android.bluetooth.BluetoothAdapter.getDefaultAdapter()
+                ?: run { println("EARHOP_ROOT fail no Bluetooth adapter"); System.exit(1); return }
+            // A check only: Bluetooth is reachable as root here. Touches no device.
+            if (action == "probe") { println("EARHOP_ROOT ok probe=true"); System.exit(0) }
             val dev: BluetoothDevice = adapter.getRemoteDevice(addr)
             adapter.getProfileProxy(ctx, object : BluetoothProfile.ServiceListener {
                 override fun onServiceConnected(profile: Int, proxy: BluetoothProfile) {

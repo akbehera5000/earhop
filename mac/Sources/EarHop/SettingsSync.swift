@@ -9,14 +9,29 @@ enum SettingsSync {
     static let keys = ["autoSwitch", "speakerFallback", "followAttention", "lowBatteryAlerts", "volumeHandover", "pauseWhenOneOut",
                        "transport", "clipSync", "clipImages", "clipReceive", "clipTransport", "clipSkipPasswords", "sleepMinutes"]
 
-    /// The changes to apply from a remote set: keys whose remote stamp (converted to this clock) is newer than ours.
-    static func merge(local: [String: Int64], remote: [String: (value: Any, stamp: Int64)], offsetMs: Int64) -> [String: (value: Any, stamp: Int64)] {
+    /// The changes to apply from a remote set: keys whose remote stamp (converted to this clock) is newer than ours and
+    /// whose value differs from ours. An equal value is never taken: every device sends the whole set every 5 minutes,
+    /// and each conversion moves a stamp a little, so taking equal values made the same settings bounce between the
+    /// devices forever, with stamps that kept growing until an old value could beat a real newer change.
+    static func merge(local: [String: Int64], remote: [String: (value: Any, stamp: Int64)], offsetMs: Int64,
+                      localValues: [String: Any] = [:], nowMs: Int64 = .max / 2) -> [String: (value: Any, stamp: Int64)] {
         var out: [String: (Any, Int64)] = [:]
         for (k, r) in remote where keys.contains(k) {
+            if let v = localValues[k], same(v, r.value) { continue }
             let mine = r.stamp - offsetMs
+            // A stamp more than a minute in the future (a clock that jumped ahead) is refused: kept, it would beat
+            // every real change on every device until that time came.
+            if mine > nowMs + 60_000 { continue }
             if mine > (local[k] ?? 0) { out[k] = (r.value, mine) }
         }
         return out.mapValues { (value: $0.0, stamp: $0.1) }
+    }
+
+    /// Values from JSON arrive as NSNumber or String; ours are Bool, Int or String.
+    static func same(_ a: Any, _ b: Any) -> Bool {
+        if let x = a as? String, let y = b as? String { return x == y }
+        if let x = a as? NSNumber, let y = b as? NSNumber { return x.isEqual(to: y) }
+        return false
     }
 
     static func values(_ c: Config) -> [String: Any] {

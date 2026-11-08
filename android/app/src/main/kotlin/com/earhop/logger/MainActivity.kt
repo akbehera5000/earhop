@@ -125,8 +125,15 @@ class MainActivity : Activity() {
     private lateinit var rootBtn: Button
     private lateinit var rootUseRow: View
     private lateinit var rootFirstRow: View
+    private lateinit var rootNote: TextView
     private lateinit var budsCard: LinearLayout
     private var budsSig = ""
+    /** The sound controls on the Buds page and, in landscape, under the earbuds card. */
+    private var pagePanel: SoundPanel? = null
+    private var homeNoise: NoiseSelector? = null
+    private var homeNoiseNote: TextView? = null
+    private var sidePanel: SoundPanel? = null
+    private var budsExtras: LinearLayout? = null
     private lateinit var batteryBox: LinearLayout
     private var batterySig = "init"
     private lateinit var rulesBox: LinearLayout
@@ -188,7 +195,7 @@ class MainActivity : Activity() {
         @Suppress("DEPRECATION")
         window.decorView.systemUiVisibility = flags
         val frame = FrameLayout(this).apply { background = g.page() }
-        scroll = ScrollView(this).apply { isFillViewport = true; overScrollMode = View.OVER_SCROLL_NEVER; isVerticalScrollBarEnabled = false }
+        scroll = SpringScrollView(this).apply { isFillViewport = true; overScrollMode = View.OVER_SCROLL_NEVER; isVerticalScrollBarEnabled = false }
         content = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(16), dp(24), dp(16), dp(120)) }
         scroll.addView(content)
         frame.addView(scroll)
@@ -222,7 +229,7 @@ class MainActivity : Activity() {
             frame.background = null
             val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_VERTICAL }
             side = col
-            sideScroll = ScrollView(this).apply {
+            sideScroll = SpringScrollView(this).apply {
                 isFillViewport = true; overScrollMode = View.OVER_SCROLL_NEVER; isVerticalScrollBarEnabled = false; addView(col)
             }
             LinearLayout(this).apply {
@@ -251,11 +258,20 @@ class MainActivity : Activity() {
             // Only the card moves; Take and Release stay at the top of Home on the right, so the card fits a phone's
             // short landscape screen without scrolling.
             (hero.parent as? ViewGroup)?.removeView(hero)
-            col.addView(hero, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+            // The card takes the height the controls leave, so the column has no empty space above or below.
+            hero.gravity = Gravity.CENTER
+            col.addView(hero, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
             hero.minimumHeight = 0
             hero.setPadding(dp(18), dp(12), dp(18), dp(14))
             (heroState.layoutParams as? LinearLayout.LayoutParams)?.topMargin = dp(8)
             heroBuds.heightDp = 184f
+            // The space above and below the card holds the sound controls (Galaxy Buds).
+            if (Earbuds.isBuds(this)) {
+                col.gravity = Gravity.TOP
+                val wrap = SpringCard(this, dp(28).toFloat()).apply { orientation = LinearLayout.VERTICAL; background = g.surface(28); setPadding(dp(18), dp(14), dp(18), dp(16)) }
+                sidePanel = SoundPanel(wrap, compact = true)
+                col.addView(wrap, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(12) })
+            }
         }
         handleScan(intent?.data?.toString())
         showPage(prefs.getString("page", "Home") ?: "Home")
@@ -282,7 +298,8 @@ class MainActivity : Activity() {
      * rebuilding a card keeps working.
      */
     private fun card(title: String?, footer: String? = null): LinearLayout {
-        val section = LinearLayout(this).apply {
+        val section = SpringCard(this, dp(28).toFloat()).apply {
+            glowColor = if (g.night) 0x26FFFFFF else 0x1A000000
             orientation = LinearLayout.VERTICAL
             background = g.surface(28)
             setPadding(dp(18), dp(16), dp(18), dp(16))
@@ -375,7 +392,8 @@ class MainActivity : Activity() {
                 orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER
                 setPadding(dp(7), dp(6), dp(7), dp(6))
                 contentDescription = name
-                setOnClickListener { if (name != currentPage) { tap(this); showPage(name) } else scroll.smoothScrollTo(0, 0) }
+                setOnClickListener { if (name != currentPage) { tap(this); Motion.jelly(this); showPage(name) } else scroll.smoothScrollTo(0, 0) }
+                Motion.springy(this, 0.86f)
             }
             val img = ImageView(this).apply { setImageResource(icon) }
             item.addView(img, LinearLayout.LayoutParams(dp(23), dp(23)))
@@ -463,8 +481,10 @@ class MainActivity : Activity() {
         headerTitle.text = if (target == "Home") "EarHop" else target
         scroll.scrollTo(0, 0)
         header.alpha = 0f
-        pages[target]?.alpha = 0f
-        pages[target]?.animate()?.alpha(1f)?.setDuration(180)?.start()
+        pages[target]?.let { p ->
+            p.alpha = 0f; p.translationY = dp(18).toFloat()
+            p.animate().alpha(1f).translationY(0f).setDuration(320).setInterpolator(android.view.animation.OvershootInterpolator(1.2f)).start()
+        }
         prefs.edit().putString("page", target).apply()
     }
 
@@ -597,6 +617,7 @@ class MainActivity : Activity() {
     }
 
     private fun button(label: String, filled: Boolean, onClick: () -> Unit): Button = QuietButton(this).apply {
+        Motion.springy(this)
         text = label
         isAllCaps = false
         textSize = 15.5f
@@ -712,22 +733,13 @@ class MainActivity : Activity() {
             setClipSync(!prefs.getBoolean("clipSync", true))
         }
         root.addView(row1, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(14) })
-        if (Earbuds.isBuds(this)) {
-            val row2 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-            quickTile(row2, Glass.Hue.VIOLET, "Noise control", null, {
-                val n = EhState.budsClient?.takeIf { it.connected }?.snapshot()?.noise
-                n != null && n != "off"
-            }, state = {
-                when (EhState.budsClient?.takeIf { it.connected }?.snapshot()?.noise) {
-                    null -> "Buds not on this device"
-                    "anc" -> "Noise cancelling"; "ambient" -> "Ambient sound"; else -> "Off"
-                }
-            }) {
-                val c = EhState.budsClient?.takeIf { it.connected }
-                if (c == null) Toast.makeText(this, "Noise control works while the Galaxy Buds are connected to this device", Toast.LENGTH_SHORT).show()
-                else c.setNoise(when (c.snapshot().noise) { "off" -> "anc"; "anc" -> "ambient"; else -> "off" })
-            }
-            root.addView(row2, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(14) })
+        // Noise control on Home: the same round selector as the Buds page (in landscape it is in the left column).
+        if (Earbuds.isBuds(this) && resources.configuration.orientation != android.content.res.Configuration.ORIENTATION_LANDSCAPE) {
+            val nc = card("Noise control")
+            homeNoiseNote = text("", 12.5f, subC).apply { visibility = View.GONE; setPadding(0, 0, 0, dp(6)) }
+            nc.addView(homeNoiseNote)
+            homeNoise = NoiseSelector(this, resources.displayMetrics.density, g.controls(accent)) { m -> EhState.budsClient?.setNoise(m); budsSig = "" }
+            nc.addView(homeNoise)
         }
 
         val strip = card("Your devices")
@@ -751,10 +763,11 @@ class MainActivity : Activity() {
      */
     private fun quickTile(parent: LinearLayout, hue: Glass.Hue, label: String, pauseKey: String?, isOn: () -> Boolean,
                           state: (() -> String)? = null, act: () -> Unit) {
-        val t = LinearLayout(this).apply {
+        // Compact: name and switch, the state, and a thin bar. Springs and glows under the finger like every card.
+        val t = SpringCard(this, dp(24).toFloat(), 0.95f).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(18), dp(16), dp(16), dp(14))
-            minimumHeight = dp(132)
+            setPadding(dp(16), dp(12), dp(14), dp(12))
+            minimumHeight = dp(92)
         }
         val top = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
         val name = text(label, 15.5f, textC).apply { typeface = medium; maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END }
@@ -763,10 +776,10 @@ class MainActivity : Activity() {
         top.addView(knob, LinearLayout.LayoutParams(dp(40), dp(24)))
         t.addView(top)
         t.addView(View(this), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
-        val st = text("", 13f, subC).apply { maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END; setPadding(0, dp(18), 0, 0) }
+        val st = text("", 13f, subC).apply { maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END; setPadding(0, dp(8), 0, 0) }
         t.addView(st)
         val bar = DotBar(this, textC, sepC)
-        t.addView(bar, lp(8))
+        t.addView(bar, lp(6))
         t.setOnClickListener { tap(it, true); act(); refresh() }
         if (pauseKey != null) t.setOnLongClickListener { tap(it, true); pauseDialog("Pause ${label.lowercase()}", pauseKey); true }
         parent.addView(t, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f).apply { if (parent.childCount > 0) leftMargin = dp(14) })
@@ -780,7 +793,7 @@ class MainActivity : Activity() {
             if (now != sig) {
                 sig = now
                 val lit = on && !paused
-                t.background = if (lit) g.aurora(28, hue, flip = hue == Glass.Hue.EMBER, outline = g.on) else g.outlined(28, g.off)
+                t.background = if (lit) g.aurora(24, hue, flip = hue == Glass.Hue.EMBER, outline = g.on) else g.outlined(24, g.off)
                 knob.background = g.knob(lit, lit)
                 name.setTextColor(if (lit) Color.WHITE else textC)
                 st.text = s
@@ -806,16 +819,18 @@ class MainActivity : Activity() {
         earbudsText = text("", 14f, textC).apply { setPadding(dp(2), dp(10), 0, 0) }
         eb.addView(earbudsText)
 
+        // Sound first (noise control, equalizer), then the Buds' own switches and Find.
+        budsCard = card("Galaxy Buds")
+        budsCard.visibility = if (Earbuds.isBuds(this)) View.VISIBLE else View.GONE
+        if (Earbuds.isBuds(this)) {
+            pagePanel = SoundPanel(budsCard)
+            budsExtras = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+            budsCard.addView(budsExtras)
+        }
+
         val bat = card("Battery")
         batteryBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         bat.addView(batteryBox)
-
-        val own = card("This device's Buds settings", "What you choose here (noise control, equalizer) is applied whenever the Buds connect to this device, so each device keeps its own.")
-        switchRow(own, "Use this device's own settings", null, { prefs.getBoolean("ownBudsSettings", true) }) { prefs.edit().putBoolean("ownBudsSettings", it).apply() }
-        own.visibility = if (Earbuds.isBuds(this)) View.VISIBLE else View.GONE
-
-        budsCard = card("Galaxy Buds controls")
-        budsCard.visibility = if (Earbuds.isBuds(this)) View.VISIBLE else View.GONE
 
         val earCard = card("In-ear detection")
         earInfo = text("", 13f, subC)
@@ -968,15 +983,16 @@ class MainActivity : Activity() {
         divider(ho)
         pauseRow(ho, "autoPausedUntil")
 
-        val extras = card("Extras", "Follow my attention: when you unlocked this device in the last 30 s and audio starts here, the earbuds come here even if another device is still playing (Android tells apps about unlocking, not typing). Calls and meetings: a call, or an app in a call mode (Zoom, Meet, WhatsApp) for 2 s, takes the earbuds before music. These settings and the clipboard ones are shared: change them on one device and they change on all.")
-        switchRow(extras, "Follow my attention", "Audio on the device you just unlocked wins", { prefs.getBoolean("followAttention", false) }) { prefs.edit().putBoolean("followAttention", it).apply() }
-        divider(extras)
-        switchRow(extras, "Keep the same volume", "When the earbuds move here, use the volume the other device had", { prefs.getBoolean("volumeHandover", true) }) { prefs.edit().putBoolean("volumeHandover", it).apply() }
-        divider(extras)
-        switchRow(extras, "Low battery alerts", "At 20 % and 10 % for each bud and the case, on every device", { prefs.getBoolean("lowBatteryAlerts", true) }) { prefs.edit().putBoolean("lowBatteryAlerts", it).apply() }
-        divider(extras)
-        switchRow(extras, "Allow other apps to control EarHop", "Tasker and similar apps: broadcasts com.earhop.logger.action.TAKE, RELEASE, SEND_CLIPBOARD, SEND_TEXT (text), SLEEP (minutes), SLEEP_CANCEL",
-            { prefs.getBoolean("allowAutomation", false) }) { prefs.edit().putBoolean("allowAutomation", it).apply() }
+        val smart = card("Smart switching", "Calls and meetings always come first: a call, or an app in call mode (Zoom, Meet, WhatsApp) for 2 s, takes the earbuds before music. Shared: change these on one device and they change on all.")
+        switchRow(smart, "Follow my attention", "Audio on the device you just unlocked wins, even if another is still playing", { prefs.getBoolean("followAttention", false) }) { prefs.edit().putBoolean("followAttention", it).apply() }
+        divider(smart)
+        switchRow(smart, "Keep the same volume", "When the earbuds move here, use the volume the other device had", { prefs.getBoolean("volumeHandover", true) }) { prefs.edit().putBoolean("volumeHandover", it).apply() }
+
+        val alerts = card("Alerts")
+        switchRow(alerts, "Low battery alerts", "At 20 % and 10 % for each bud and the case, on every device", { prefs.getBoolean("lowBatteryAlerts", true) }) { prefs.edit().putBoolean("lowBatteryAlerts", it).apply() }
+
+        val auto = card("Automation", "Tasker and similar apps send the broadcasts com.earhop.logger.action.TAKE, RELEASE, SEND_CLIPBOARD, SEND_TEXT (extra text), SLEEP (extra minutes) and SLEEP_CANCEL.")
+        switchRow(auto, "Allow other apps to control EarHop", null, { prefs.getBoolean("allowAutomation", false) }) { prefs.edit().putBoolean("allowAutomation", it).apply() }
 
         val rulesCard = card("Switching rules")
         rulesBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
@@ -1005,6 +1021,8 @@ class MainActivity : Activity() {
                 { prefs.getBoolean("useRoot", true) }) { prefs.edit().putBoolean("useRoot", it).apply() }
             rootFirstRow = switchRow(rc, "Always use root first", "Most reliable on a rooted tablet",
                 { prefs.getBoolean("rootFirst", false) }) { prefs.edit().putBoolean("rootFirst", it).apply() }
+            rootNote = text("Connecting through root does not work on this Android version, so EarHop connects the normal way. Root is still used for the clipboard.", 12.5f, subC)
+            rc.addView(rootNote)
         }
 
         permsCard = card("Permissions")
@@ -1077,7 +1095,7 @@ class MainActivity : Activity() {
      * the earbuds are here, indigo while they are elsewhere, violet while switching.
      */
     private fun buildDashboard() {
-        val c = LinearLayout(this).apply {
+        val c = SpringCard(this, dp(36).toFloat(), 0.985f).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
             setPadding(dp(22), dp(20), dp(22), dp(22))
@@ -1327,7 +1345,7 @@ class MainActivity : Activity() {
         stripBox.removeAllViews()
         names.forEachIndexed { i, n ->
             val (s, color) = states[i]
-            val cell = LinearLayout(this).apply {
+            val cell = SpringCard(this, dp(16).toFloat(), 0.94f).apply {
                 orientation = LinearLayout.VERTICAL
                 background = round(chipC, 16)
                 setPadding(dp(12), dp(10), dp(10), dp(10))
@@ -1724,55 +1742,75 @@ class MainActivity : Activity() {
 
     // ---------- Galaxy Buds controls ----------
 
+    /**
+     * Noise control (three round buttons) and the equalizer, as live controls that
+     * update in place (never rebuilt), so they animate between states.
+     */
+    inner class SoundPanel(box: LinearLayout, compact: Boolean = false) {
+        private val colors = g.controls(accent)
+        val status = text("", 13f, subC).apply { visibility = View.GONE; setPadding(0, 0, 0, dp(12)) }
+        val noise = NoiseSelector(this@MainActivity, resources.displayMetrics.density, colors) { m -> EhState.budsClient?.setNoise(m); budsSig = "" }
+        val eq = EqButtons(this@MainActivity, resources.displayMetrics.density, colors) { i ->
+            EhState.budsClient?.setEq(BudsProtocol.EQ_PRESETS[i]); budsSig = ""
+        }
+
+        init {
+            box.addView(status)
+            box.addView(text("Noise control", 13f, subC).apply { setPadding(0, dp(2), 0, dp(6)) })
+            box.addView(noise)
+            box.addView(text("Equalizer", 13f, subC).apply { setPadding(0, dp(if (compact) 12 else 16), 0, dp(8)) })
+            box.addView(eq)
+        }
+
+        fun update(c: BudsClient?, sn: BudsProtocol.State?) {
+            val live = c != null && sn != null
+            status.visibility = if (live) View.GONE else View.VISIBLE
+            status.text = "Take the Buds to this device to control them (wear channel: ${EhState.buds})."
+            for (v in listOf<View>(noise, eq)) v.alpha = if (live) 1f else 0.45f
+            noise.enabledChoice = live; eq.enabledChoice = live
+            if (!live) return
+            noise.setMode(sn!!.noise)
+            eq.setIndex(BudsProtocol.EQ_PRESETS.indexOf(sn.eq))
+        }
+    }
+
     private fun refreshBuds() {
         if (!Earbuds.isBuds(this)) { budsCard.visibility = View.GONE; return }
         budsCard.visibility = View.VISIBLE
         val c = EhState.budsClient
         val live = c != null && c.connected
         val sn = if (live) c!!.snapshot() else null
-        val sig = if (sn == null) "off${EhState.buds}${c?.findMessage}" else with(sn) {
-            "$noise$eq$spatial$touchOn$seamless${c!!.findActive}${c.findMessage}$muteL$muteR"
+        pagePanel?.update(if (live) c else null, sn)
+        homeNoise?.let { hn ->
+            hn.enabledChoice = sn != null; hn.alpha = if (sn != null) 1f else 0.45f
+            if (sn != null) hn.setMode(sn.noise)
+            homeNoiseNote?.text = "Take the Buds to this device to change it."
+            homeNoiseNote?.visibility = if (sn == null) View.VISIBLE else View.GONE
         }
+        sidePanel?.update(if (live) c else null, sn)
+        // The switches and Find below the sound controls: rebuilt only when they change.
+        val box = budsExtras ?: return
+        val sig = if (sn == null) "off" else with(sn) { "$touchOn$seamless${c!!.findActive}${c.findMessage}" } + prefs.getBoolean("ownBudsSettings", true)
         if (sig == budsSig) return
         budsSig = sig
-        while (budsCard.childCount > 1) budsCard.removeViewAt(1)
-        if (sn == null || c == null) {
-            budsCard.addView(text("Take the Buds to this device and start EarHop to control them. Wear channel: ${EhState.buds}. Noise control, equalizer and Find only work on the device that holds the Buds.", 13f, subC))
-            return
-        }
-        fun pill(label: String, on: Boolean, desc: String, act: () -> Unit) = button(label, on) { act(); budsSig = "" }.apply {
-            contentDescription = "$desc${if (on) ", selected" else ""}"
-        }
-        fun rowOf(vararg btns: Button) = buttons(budsCard, *btns, top = 8)
-
-        budsCard.addView(text("Noise control", 13f, subC))
-        rowOf(pill("Off", sn.noise == "off", "Noise control off") { c.setNoise("off") },
-            pill("ANC", sn.noise == "anc", "Active noise cancelling") { c.setNoise("anc") },
-            pill("Ambient", sn.noise == "ambient", "Ambient sound") { c.setNoise("ambient") })
-        budsCard.addView(text("Noise cancelling needs both Buds in your ears, unless Noise controls with one earbud is on in Galaxy Wearable.", 11.5f, subC).apply { setPadding(0, dp(6), 0, 0) })
-
-        budsCard.addView(text("Equalizer${if (sn.eq == "custom") " (custom curve set in Galaxy Wearable)" else ""}", 13f, subC).apply { setPadding(0, dp(14), 0, 0) })
-        val names = listOf("Off", "Bass", "Soft", "Dynamic", "Clear", "Treble")
-        for (row in 0 until 2) rowOf(*Array(3) { i ->
-            val k = row * 3 + i
-            pill(names[k], sn.eq == BudsProtocol.EQ_PRESETS[k], "Equalizer ${names[k]}") { c.setEq(BudsProtocol.EQ_PRESETS[k]) }
-        })
-
+        box.removeAllViews()
+        divider(box)
+        switchRow(box, "Use this device's own sound", "Noise control and equalizer chosen here are applied whenever the Buds connect to this device.",
+            { prefs.getBoolean("ownBudsSettings", true) }, track = false) { prefs.edit().putBoolean("ownBudsSettings", it).apply(); budsSig = "" }
+        if (sn == null || c == null) return
         fun toggle(label: String, sub: String?, v: Boolean?, act: (Boolean) -> Unit) {
             if (v == null) return
-            divider(budsCard)
-            switchRow(budsCard, label, sub, { v }, track = false) { act(it); budsSig = "" }
+            divider(box)
+            switchRow(box, label, sub, { v }, track = false) { act(it); budsSig = "" }
         }
-        budsCard.addView(View(this), lp(4))
-        toggle("360 Audio", null, sn.spatial) { c.setSpatial(it) }
         toggle("Touch controls", null, sn.touchOn) { c.setTouch(it) }
         toggle("Quick connect", "Samsung's own switching. Turn off if it fights EarHop.", sn.seamless) { c.setSeamless(it) }
-
-        budsCard.addView(text("Find my Buds", 13f, subC).apply { setPadding(0, dp(14), 0, 0) })
-        if (c.findActive) budsCard.addView(pill("Stop ringing", true, "Stop ringing the Buds") { c.findStop("Search stopped") }, lp(8))
-        else budsCard.addView(pill("Ring the Buds", false, "Ring the Buds") { c.findStart() }, lp(8))
-        if (c.findMessage.isNotEmpty()) budsCard.addView(text(c.findMessage, 12f, subC))
-        budsCard.addView(text("Rings quietly then loud. Refused while a bud may be in your ear, and it stops itself after a minute.", 11.5f, subC).apply { setPadding(0, dp(6), 0, 0) })
+        divider(box)
+        box.addView(text("Find my Buds", 13f, subC).apply { setPadding(0, dp(10), 0, 0) })
+        if (c.findActive) box.addView(button("Stop ringing", true) { c.findStop("Search stopped"); budsSig = "" }, lp(8))
+        else box.addView(button("Ring the Buds", false) { c.findStart(); budsSig = "" }, lp(8))
+        if (c.findMessage.isNotEmpty()) box.addView(text(c.findMessage, 12f, subC))
+        box.addView(text("Rings quietly then loud. Refused while a bud may be in your ear; it stops itself after a minute. Noise cancelling needs both Buds in your ears unless Galaxy Wearable allows one.", 11.5f, subC).apply { setPadding(0, dp(6), 0, 0) })
     }
 
     // ---------- onboarding ----------
@@ -2428,8 +2466,11 @@ class MainActivity : Activity() {
         rootCard?.let {
             val granted = prefs.getBoolean("rootGranted", false)
             rootBtn.text = if (granted) "Root granted (tap to turn off)" else "Grant root access"
-            rootUseRow.visibility = if (granted) View.VISIBLE else View.GONE
-            rootFirstRow.visibility = if (granted) View.VISIBLE else View.GONE
+            // Root switching hidden once the helper was found not to reach Bluetooth here (fix 3, 2026-11-08).
+            val btOk = RootShell.btHelper != false
+            rootUseRow.visibility = if (granted && btOk) View.VISIBLE else View.GONE
+            rootFirstRow.visibility = if (granted && btOk) View.VISIBLE else View.GONE
+            rootNote.visibility = if (granted && !btOk) View.VISIBLE else View.GONE
         }
         linkText.text = if (run) "Working now: ${EhState.transport}" else "Start EarHop to connect"
         linkText.setTextColor(if (run && EhState.transport.contains("nobody")) orange else subC)

@@ -6,13 +6,43 @@ import CoreImage
 import UserNotifications
 
 enum Notifier {
-    static func requestAuth() {
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
+    /// Without a delegate macOS drops notifications while EarHop counts as the active app (popover or settings open).
+    private final class Presenter: NSObject, UNUserNotificationCenterDelegate {
+        func userNotificationCenter(_ c: UNUserNotificationCenter, willPresent n: UNNotification,
+                                    withCompletionHandler done: @escaping (UNNotificationPresentationOptions) -> Void) {
+            if #available(macOS 11.0, *) { done([.banner, .list, .sound]) } else { done([.alert, .sound]) }
+        }
+        /// Clicking a "file received" notification shows the file in Finder.
+        func userNotificationCenter(_ c: UNUserNotificationCenter, didReceive r: UNNotificationResponse,
+                                    withCompletionHandler done: @escaping () -> Void) {
+            if let p = r.notification.request.content.userInfo["file"] as? String, FileManager.default.fileExists(atPath: p) {
+                DispatchQueue.main.async { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: p)]) }
+            }
+            done()
+        }
     }
-    static func post(_ title: String, _ body: String) {
+    private static let presenter = Presenter()
+    /// False when the user turned EarHop's notifications off in System Settings (shown on the Settings page).
+    static var allowed = true
+
+    static func requestAuth() {
+        let c = UNUserNotificationCenter.current()
+        c.delegate = presenter
+        c.requestAuthorization(options: [.alert, .sound]) { ok, err in
+            c.getNotificationSettings { s in
+                allowed = s.authorizationStatus == .authorized || s.authorizationStatus == .provisional
+                Log.write("notifications: \(allowed ? "allowed" : "not allowed in System Settings")"
+                          + (s.alertSetting == .disabled ? ", banners off" : "") + (err.map { " (\($0.localizedDescription))" } ?? "") + (ok ? "" : ", request refused"))
+            }
+        }
+    }
+    static func post(_ title: String, _ body: String, file: URL? = nil) {
         let c = UNMutableNotificationContent()
-        c.title = title; c.body = body
-        UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: UUID().uuidString, content: c, trigger: nil))
+        c.title = title; c.body = body; c.sound = .default
+        if let file { c.userInfo = ["file": file.path] }
+        UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: UUID().uuidString, content: c, trigger: nil)) { err in
+            if let err { Log.write("notifications: could not show \"\(title)\": \(err.localizedDescription)") }
+        }
     }
 }
 
@@ -107,3 +137,4 @@ enum AutoGate {
         return nil
     }
 }
+

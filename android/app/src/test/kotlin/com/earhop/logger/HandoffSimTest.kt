@@ -10,7 +10,12 @@ import org.junit.Test
  * Play/Pause key, audio output that looks busy for a moment after a pause, slow disconnects, and connects that fail
  * while another device still holds the earbuds.
  */
-class HandoffSimTest {
+/** Connect and disconnect times for the simulator; [HandoffSimRealTimingTest] runs every timeline with the real ones. */
+object SimTiming { var connectMs = 1500L; var disconnectMs = 500L }
+
+open class HandoffSimTest {
+    @org.junit.Before open fun timing() { SimTiming.connectMs = 1500L; SimTiming.disconnectMs = 500L }
+
     class Dev(val name: String, val toggle: Boolean, settings: HandoffSettings) {
         val core = HandoffCore(settings)
         var playerOn = false
@@ -32,8 +37,10 @@ class HandoffSimTest {
         var now = 1_700_000_000_000L
         var holder: String? = null
         val devs = mutableListOf<Dev>()
-        var connectMs = 1500L
-        var disconnectMs = 500L
+        var connectMs = SimTiming.connectMs
+        var disconnectMs = SimTiming.disconnectMs
+        /** The earbuds reconnect by themselves to this device 0.5 s after the next release (once), as Galaxy Buds do. */
+        var strayTo: String? = null
         private val timers = mutableListOf<Pair<Long, () -> Unit>>()
 
         fun add(name: String, toggle: Boolean = false, tweak: (HandoffSettings) -> Unit = {}): Dev {
@@ -71,7 +78,13 @@ class HandoffSimTest {
                 }
                 is HandoffAction.Release -> {
                     d.releases++
-                    after(disconnectMs) { if (holder == d.name) holder = null; d.core.releaseFinished(now) }
+                    after(disconnectMs) {
+                        if (holder == d.name) {
+                            holder = null
+                            strayTo?.let { s -> strayTo = null; after(500) { if (holder == null) holder = s } }
+                        }
+                        d.core.releaseFinished(now)
+                    }
                 }
                 else -> {}
             }
@@ -99,6 +112,26 @@ class HandoffSimTest {
         }
 
         fun run(seconds: Double) = repeat((seconds * 4).toInt()) { step() }
+    }
+
+    /** The 2026-11-08 hop: the Mac lets go for the phone and the Buds reconnect by themselves to the idle tablet. */
+    @Test fun strayReconnectIsHandedOn() {
+        val w = World(); val mac = w.add("mac", true); val phone = w.add("phone"); val tab = w.add("tab")
+        w.holder = "mac"; w.play(mac); w.run(5.0)
+        w.strayTo = "tab"
+        w.play(phone); w.run(25.0)
+        assertEquals(1, tab.releases); assertEquals(0, tab.claims)
+        assertEquals("phone", w.holder)
+        assertEquals(1, mac.pauses); assertEquals(0, tab.pauses)
+    }
+
+    /** Connecting the earbuds by hand to an idle device is kept, also while another device plays without them. */
+    @Test fun manualConnectWhileAnotherPlaysIsKept() {
+        val w = World(); val phone = w.add("phone"); val tab = w.add("tab")
+        phone.gate = "quiet hours"
+        w.play(phone); w.run(10.0)
+        w.holder = "tab"; w.run(20.0)
+        assertEquals("tab", w.holder); assertEquals(0, tab.releases)
     }
 
     @Test fun macOwnsPhoneStartsPlaying() {
@@ -247,4 +280,9 @@ class HandoffSimTest {
         w.play(mac); w.play(phone); w.run(10.0)
         assertEquals("mac", w.holder)
     }
+}
+
+/** Fix 6: every timeline again with the real connect and disconnect times seen on the Buds (7 s and 1.5 s). */
+class HandoffSimRealTimingTest : HandoffSimTest() {
+    @org.junit.Before override fun timing() { SimTiming.connectMs = 7000L; SimTiming.disconnectMs = 1500L }
 }

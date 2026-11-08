@@ -242,3 +242,63 @@ class Receipts {
         return parts.joinToString("; ")
     }
 }
+
+/**
+ * Which link carries a clipboard message to which device (same rule as ClipRoute in Clipboard.swift). Pure, tested.
+ * "both" (the default): text and small control messages over Bluetooth, Wi-Fi only for devices Bluetooth cannot reach
+ * right now; images and large replies over Wi-Fi, Bluetooth only for devices with no Wi-Fi route (when small enough).
+ * "ble": Bluetooth only for what fits, Wi-Fi only when Bluetooth reaches nobody. "wifi": Wi-Fi only.
+ */
+object ClipRoute {
+    private val large = setOf("image", "diag")
+    fun plan(kind: String, size: Int, mode: String, wanted: Set<String>, ble: Set<String>, wifi: Set<String>, maxBle: Int): Pair<Set<String>, Set<String>> {
+        val fits = size <= maxBle
+        val b = wanted intersect ble
+        val w = wanted intersect wifi
+        return when {
+            mode == "wifi" -> Pair(emptySet(), w)
+            kind in large && mode == "ble" -> if (fits && b.isNotEmpty()) Pair(b, emptySet()) else Pair(emptySet(), w)
+            kind in large -> Pair(if (fits) b - w else emptySet(), w)
+            !fits -> Pair(emptySet(), w)
+            mode == "ble" -> Pair(b, if (b.isEmpty()) w else emptySet())
+            else -> Pair(b, w - b)
+        }
+    }
+}
+
+/**
+ * Bluetooth health per device (same rule as BleHealth in Clipboard.swift). A device that refused for lack of pairing
+ * gets no Bluetooth tries, so no pairing requests, for 6 hours or until it is paired; other failures wait 2, 4, 8 and
+ * at most 10 minutes from the second in a row. Pure, tested.
+ */
+class BleHealth {
+    private val until = HashMap<String, Long>()
+    private val fails = HashMap<String, Int>()
+    private val auth = HashSet<String>()
+    @Synchronized fun usable(dev: String, now: Long) = now >= (until[dev] ?: 0L)
+    @Synchronized fun needsPairing(dev: String) = dev in auth
+    /** Records a result; returns a line for the log when the state of that device changed. */
+    @Synchronized fun report(dev: String, ok: Boolean, pairing: Boolean, now: Long): String? {
+        if (ok) {
+            val was = until.remove(dev) != null || (fails.remove(dev) ?: 0) >= 2 || auth.remove(dev)
+            return if (was) "clip: Bluetooth to $dev works again" else null
+        }
+        if (pairing) {
+            auth += dev; until[dev] = now + 6 * 3600_000L
+            return "clip: Bluetooth to $dev needs pairing again (remove each from the other's Bluetooth list, then pair); no Bluetooth tries to it for 6 hours, Wi-Fi carries its clips"
+        }
+        val n = (fails[dev] ?: 0) + 1
+        fails[dev] = n
+        if (n < 2) return null
+        val wait = minOf(10 * 60_000L, 2 * 60_000L shl minOf(n - 2, 3))
+        until[dev] = now + wait
+        return "clip: Bluetooth to $dev failed $n times in a row; next try in ${wait / 60_000} min, Wi-Fi carries its clips"
+    }
+    /** Pairing finished (Android's bond state), so try again at once. */
+    @Synchronized fun paired(dev: String) { until.remove(dev); fails.remove(dev); auth.remove(dev) }
+}
+
+object ClipRules {
+    /** Android clears the clipboard one hour after the last copy; a "copy" seen right then is that clear. Pure, tested. */
+    fun isAutoClear(now: Long, lastChange: Long) = lastChange > 0 && now - lastChange in 3_590_000L..3_630_000L
+}

@@ -52,4 +52,17 @@ class FeaturesTest {
         assertEquals(setOf("clipSync"), m.keys)          // older changes and local-only settings are ignored
         assertEquals(4000L, m["clipSync"]!!.second)     // stamp moved to this device's clock
     }
+
+    @Test fun sharedSettingsEqualValueIsNotTakenAgain() {
+        val m = SettingsSync.merge(mapOf("clipSync" to 2000L, "sleepMinutes" to 2000L),
+            mapOf("clipSync" to Pair(true as Any, 9000L), "sleepMinutes" to Pair(45 as Any, 9000L)), 0L,
+            mapOf("clipSync" to true, "sleepMinutes" to 30))
+        assertEquals(setOf("sleepMinutes"), m.keys)     // the echo of an equal value is ignored, so it cannot bounce
+    }
+
+    @Test fun sharedSettingsFutureStampIsRefused() {
+        val m = SettingsSync.merge(mapOf("clipSync" to 2000L), mapOf("clipSync" to Pair(false as Any, 500_000L)), 0L,
+            mapOf("clipSync" to true), 100_000L)
+        assertTrue(m.isEmpty())
+    }
 }

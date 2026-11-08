@@ -16,6 +16,19 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/EarHop"
 cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 cp Resources/EarHop.sdef "$APP/Contents/Resources/EarHop.sdef"
+
+# Share menu extension (ShareExtension/): a small sandboxed plug-in that hands shared files to EarHop.
+APPEX="$APP/Contents/PlugIns/EarHopShare.appex"
+mkdir -p "$APPEX/Contents/MacOS"
+cp ShareExtension/Info.plist "$APPEX/Contents/Info.plist"
+SX="$(mktemp -d)"
+for A in arm64 x86_64; do
+  swiftc -O -module-name EarHopShare -target $A-apple-macos13.0 -parse-as-library \
+    -Xlinker -e -Xlinker _NSExtensionMain -framework AppKit \
+    ShareExtension/ShareViewController.swift -o "$SX/share-$A"
+done
+lipo -create "$SX/share-arm64" "$SX/share-x86_64" -output "$APPEX/Contents/MacOS/EarHopShare"
+rm -rf "$SX"
 PL="$APP/Contents/Info.plist"
 cp Sources/EarHop/Info.plist "$PL"
 pb() { /usr/libexec/PlistBuddy -c "$1" "$PL" >/dev/null 2>&1 || /usr/libexec/PlistBuddy -c "$2" "$PL"; }
@@ -52,9 +65,11 @@ CNF
   rm -rf "$T"
 fi
 if security find-identity -p codesigning | grep -q "$ID"; then
+  codesign --force --sign "$ID" --identifier com.earhop.mac.share --entitlements ShareExtension/EarHopShare.entitlements "$APPEX"
   codesign --force --sign "$ID" --identifier com.earhop.mac "$APP"
 else
   echo "Using ad hoc signing (permissions will be asked again after every update)"
+  codesign --force --sign - --identifier com.earhop.mac.share --entitlements ShareExtension/EarHopShare.entitlements "$APPEX"
   codesign --force --sign - --identifier com.earhop.mac "$APP"
 fi
 codesign --verify --strict "$APP"

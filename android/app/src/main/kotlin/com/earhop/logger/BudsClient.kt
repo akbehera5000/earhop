@@ -95,7 +95,6 @@ class BudsClient(private val ctx: Context, private val filter: () -> String, pri
 
     fun setNoise(mode: String) = send(BudsProtocol.noiseCommand(mode)).also { if (it) onUserChoice?.invoke("noise", mode) }
     fun setEq(preset: String) = send(BudsProtocol.eqCommand(preset)).also { if (it) onUserChoice?.invoke("eq", preset) }
-    fun setSpatial(on: Boolean) = send(BudsProtocol.spatialCommand(on))
     fun setSeamless(on: Boolean) = send(BudsProtocol.seamlessCommand(on))
     fun setTouch(on: Boolean) = send(BudsProtocol.touchCommand(on, snapshot()))
 
@@ -179,10 +178,13 @@ class BudsClient(private val ctx: Context, private val filter: () -> String, pri
                         failures = 0
                         EhState.buds = "connected"
                         EhLog.w("buds: wear channel open")
-                        // Separate settings per device: this device's own noise control and equalizer.
+                        // Separate settings per device: this device's own noise control and equalizer, once it has
+                        // held the Buds 5 s. A stray connection of a second or two (the Buds reconnecting by themselves
+                        // during a handoff) must not change them for the device that is taking them.
                         val own = ownSettings()
                         Thread {
-                            try { Thread.sleep(1500) } catch (e: InterruptedException) { }
+                            try { Thread.sleep(5000) } catch (e: InterruptedException) { }
+                            if (socket !== s) return@Thread
                             own.first?.let { send(BudsProtocol.noiseCommand(it)); EhLog.w("buds: applied this device's noise control $it") }
                             own.second?.let { send(BudsProtocol.eqCommand(it)); EhLog.w("buds: applied this device's equalizer $it") }
                         }.start()

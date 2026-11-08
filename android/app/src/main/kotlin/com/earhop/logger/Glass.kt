@@ -40,7 +40,11 @@ class Glass(private val ctx: Context, val night: Boolean, val accent: Int) {
     val off = 0xFFA07878.toInt()
     /** Text on a primary button and on the selected segment. */
     val onPrimary = if (night) 0xFF000000.toInt() else 0xFFFFFFFF.toInt()
-    private val primary = if (night) 0xFFFFFFFF.toInt() else 0xFF111114.toInt()
+    val primary = if (night) 0xFFFFFFFF.toInt() else 0xFF111114.toInt()
+
+    /** Colours for the noise selector and stop sliders. The glow is the accent (decoration only). */
+    fun controls(glowColor: Int) = ControlColors(text, sub, if (night) 0xFF2A2A2E.toInt() else 0xFFE4E4EA.toInt(),
+        if (night) 0x40FFFFFF else 0x33000000, primary, onPrimary, (glowColor and 0x00FFFFFF) or 0x66000000)
     private val hairline = if (night) 0x1FFFFFFF else 0x17000000
 
     /** The colour cards. Text on them is always white. */

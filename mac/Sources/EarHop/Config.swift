@@ -183,7 +183,10 @@ enum Log {
         NSPasteboard.general.setString(tail(), forType: .string)
     }
 
-    static func write(_ msg: String) {
+    private static let repeats = LogRepeat()
+
+    static func write(_ msg0: String) {
+        guard let msg = repeats.gate(msg0, now: Date()) else { return }
         let line = "\(fmt.string(from: Date())) \(msg)\n"
         print(line, terminator: "")
         let shown = line.trimmingCharacters(in: .newlines)
@@ -202,5 +205,25 @@ enum Log {
                 try? line.write(to: file, atomically: true, encoding: .utf8)
             }
         }
+    }
+}
+
+/// Repeated failure lines (the same text apart from numbers) are written once, then dropped for 5 minutes; the next
+/// one carries how many were dropped. Without it one device that could not be reached filled the log in hours and
+/// pushed the switching lines out. Other lines always pass. Same rule as LogRepeat in EhLog.kt. Pure, tested.
+final class LogRepeat {
+    private var seen: [String: (at: Date, dropped: Int)] = [:]
+    private let lock = NSLock()
+
+    func gate(_ msg: String, now: Date) -> String? {
+        guard msg.contains("failed") || msg.contains("retrying") || msg.contains("not reachable") else { return msg }
+        let key = msg.replacingOccurrences(of: "[0-9]+", with: "#", options: .regularExpression)
+        lock.lock(); defer { lock.unlock() }
+        if let s = seen[key], now.timeIntervalSince(s.at) < 300 { seen[key] = (s.at, s.dropped + 1); return nil }
+        let prev = seen[key]
+        seen[key] = (now, 0)
+        if seen.count > 200 { seen = seen.filter { now.timeIntervalSince($0.value.at) < 300 } }
+        if let p = prev, p.dropped > 0 { return "\(msg) (and \(p.dropped) more like this in the last \(Int(now.timeIntervalSince(p.at) / 60)) min)" }
+        return msg
     }
 }

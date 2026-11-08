@@ -138,6 +138,10 @@ class EarService : Service() {
         EhState.wifiPeers = { skip -> link?.peerHostsExcept(skip) ?: emptyList() }
         EhState.wifiHostsOf = { dev -> link?.hostsOf(dev) ?: emptyList() }
         try { ClipSync.start(this) } catch (e: Exception) { EhLog.w("clip: start failed ${e.message}") }
+        // Check the root Bluetooth helper once in the background, so no switch waits for it (or tries it when it fails).
+        getSharedPreferences("earhop", MODE_PRIVATE).let { p ->
+            if (p.getBoolean("rootGranted", false) && p.getBoolean("useRoot", false)) Thread { RootShell.btHelperWorks(this) }.start()
+        }
         extras = Extras(this).also { x -> ClipSync.onControl = { _, item -> x.onControl(item) } }
         ble?.onRecovered = { ClipSync.restartGatt() }
 
@@ -316,7 +320,9 @@ class EarService : Service() {
                 buds = BudsClient(this, { Earbuds.filter(this) }) { isOwner(filter) }.also { c ->
                     val p = getSharedPreferences("earhop", MODE_PRIVATE)
                     // Separate noise control and equalizer per device: what is chosen here is applied when the Buds connect here.
-                    c.onUserChoice = { kind, value -> if (p.getBoolean("ownBudsSettings", true)) p.edit().putString(if (kind == "noise") "budsNoise" else "budsEq", value).apply() }
+                    c.onUserChoice = { kind, value ->
+                        if (p.getBoolean("ownBudsSettings", true)) p.edit().putString(if (kind == "noise") "budsNoise" else "budsEq", value).apply()
+                    }
                     c.ownSettings = {
                         if (!p.getBoolean("ownBudsSettings", true)) Pair(null, null)
                         else Pair(p.getString("budsNoise", null), p.getString("budsEq", null))

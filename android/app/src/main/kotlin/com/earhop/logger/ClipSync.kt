@@ -117,6 +117,23 @@ class ClipGatt(private val ctx: Context, private val selfName: String, private v
     private val lookedUp = java.util.concurrent.ConcurrentHashMap<Int, Long>()
     private val assembler = ClipChunks.Assembler()
     private val worker = Executors.newSingleThreadExecutor()
+    /** One queue per device: a device that does not answer (36 s per try) no longer holds up the sends to the others. */
+    private val workers = java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.ExecutorService>()
+    private val jobSeq = java.util.concurrent.atomic.AtomicLong()
+    /** A send in a device's queue: what the user copied goes ahead of battery, volume and settings messages. */
+    private class Job(val urgent: Boolean, val seq: Long, val run: Runnable) : Runnable, Comparable<Job> {
+        override fun run() = run.run()
+        override fun compareTo(other: Job) = if (urgent != other.urgent) (if (urgent) -1 else 1) else seq.compareTo(other.seq)
+    }
+    private fun queueFor(name: String) = workers.getOrPut(name) {
+        java.util.concurrent.ThreadPoolExecutor(1, 1, 0L, java.util.concurrent.TimeUnit.MILLISECONDS, java.util.concurrent.PriorityBlockingQueue<Runnable>())
+    }
+    val health = BleHealth()
+    /** Where the last send on this thread stopped (each device has its own thread). */
+    private var lastStage: String
+        get() = stageOf.get() ?: ""
+        set(v) = stageOf.set(v)
+    private val stageOf = ThreadLocal<String>()
 
     /**
      * Opens the clipboard service, closing any earlier one first. Called again after Android's Bluetooth restarts:
@@ -162,30 +179,55 @@ class ClipGatt(private val ctx: Context, private val selfName: String, private v
         } catch (e: Exception) { EhLog.w("clip: Bluetooth server failed: ${e.message}") }
     }
 
-    /** Sends a frame to each device (name to Bluetooth device), one after the other, each with a short connection. */
-    fun send(frame: ByteArray, devices: List<Pair<String, BluetoothDevice>>) {
+    /**
+     * Sends a frame to each device (name to Bluetooth device), each on its own queue with a short connection. A device
+     * that fails (or is resting after failures) is handed to [onFail], which sends to it over Wi-Fi instead.
+     */
+    fun send(frame: ByteArray, devices: List<Pair<String, BluetoothDevice>>, urgent: Boolean = false, kind: String = "", onFail: (String) -> Unit = {}) {
         if (frame.size > MAX_FRAME) return
         val tag = java.util.Random().nextInt()
-        for ((name, d0) in devices) worker.execute {
+        for ((name, d0) in devices) {
+          val q = queueFor(name)
+          // A safety cap: with more than 30 messages already waiting for one device, new control messages to it are
+          // dropped (copied text never is). Nothing should ever pile up like that; if it does, it must not snowball.
+          if (!urgent && (q as? java.util.concurrent.ThreadPoolExecutor)?.queue?.size ?: 0 > 30) {
+            EhLog.w("clip: Bluetooth queue to $name is full, a $kind message was dropped (failed to keep up)"); onFail(name); continue
+          }
+          q.execute(Job(urgent, jobSeq.incrementAndGet(), Runnable {
+            if (!health.usable(name, System.currentTimeMillis())) { onFail(name); return@Runnable }
             // The address may have changed while earlier sends ran (some devices take a new one every minute).
             val d = EhState.bleDevices[name]?.first ?: d0
-            if (!sendTo(frame, tag, name, d)) {
-                // One retry with the device's newest address: some Android devices change it whenever they restart advertising.
+            var r = sendTo(frame, tag, name, d, kind)
+            if (!r.first && !r.second && lastStage.let { it == "connecting" || it == "setting up" }) {
+                // Usually both devices connecting to each other at the same moment (a receipt going back while the clip
+                // still arrives): one quiet retry before it counts as a failure.
+                try { Thread.sleep(1500) } catch (e: InterruptedException) { }
+                r = sendTo(frame, tag, name, EhState.bleDevices[name]?.first ?: d, kind)
+            }
+            if (!r.first && !r.second) {
+                // One retry, only with a newer address: some Android devices change it whenever they restart advertising.
                 val fresh = EhState.bleDevices[name]?.first
-                if (fresh != null) {
-                    EhLog.w("clip: retrying $name with its newest Bluetooth address${if (fresh.address == d.address) " (unchanged)" else ""}")
-                    sendTo(frame, tag, name, fresh)
+                if (fresh != null && fresh.address != d.address) {
+                    EhLog.w("clip: retrying $name with its newest Bluetooth address")
+                    r = sendTo(frame, tag, name, fresh, kind)
                 }
             }
+            health.report(name, r.first, r.second, System.currentTimeMillis())?.let { EhLog.w(it) }
+            if (!r.first) onFail(name)
+          }))
         }
     }
 
+    /** (sent, refused for lack of pairing). */
     @Suppress("DEPRECATION")
-    private fun sendTo(frame: ByteArray, tag: Int, name: String, device: BluetoothDevice): Boolean {
+    private fun sendTo(frame: ByteArray, tag: Int, name: String, device: BluetoothDevice, kind: String = ""): Pair<Boolean, Boolean> {
         var stage = "connecting"
         val done = java.util.concurrent.CountDownLatch(1)
         val connected = java.util.concurrent.CountDownLatch(1)
         var ok = false
+        var authFail = false
+        // Paired devices write in well under a second; only an unpaired one needs time to accept the pairing request.
+        val bonded = try { device.bondState == BluetoothDevice.BOND_BONDED } catch (e: SecurityException) { false }
         val chunks = ClipChunks.split(frame, 172, tag)
         var next = 0
         var gatt: BluetoothGatt? = null
@@ -205,7 +247,7 @@ class ClipGatt(private val ctx: Context, private val selfName: String, private v
             override fun onServicesDiscovered(g: BluetoothGatt, status: Int) { writeNext(g) }
             override fun onCharacteristicWrite(g: BluetoothGatt, ch: BluetoothGattCharacteristic, status: Int) {
                 if (status != BluetoothGatt.GATT_SUCCESS) {
-                    if (status == 5 || status == 15) stage = "pairing: accept the pairing request on both devices"
+                    if (status == 5 || status == 15) { stage = "pairing: accept the pairing request on both devices"; authFail = true }
                     done.countDown(); return
                 }
                 next++; writeNext(g)
@@ -213,12 +255,15 @@ class ClipGatt(private val ctx: Context, private val selfName: String, private v
         }
         try {
             gatt = device.connectGatt(ctx, false, cb, BluetoothDevice.TRANSPORT_LE)
-            // 6 s to connect, then 30 s for the rest: enough to accept the one-time pairing request.
-            if (connected.await(6, java.util.concurrent.TimeUnit.SECONDS)) done.await(30, java.util.concurrent.TimeUnit.SECONDS)
+            // 6 s to connect, then 10 s (paired) or 30 s (enough to accept the one-time pairing request) for the rest.
+            if (connected.await(6, java.util.concurrent.TimeUnit.SECONDS)) done.await(if (bonded) 10L else 30L, java.util.concurrent.TimeUnit.SECONDS)
         } catch (e: Exception) { }
         try { gatt?.disconnect(); gatt?.close() } catch (e: Exception) { }
-        EhLog.w("clip: Bluetooth send to $name ${if (ok) "done" else "failed while $stage"}")
-        return ok
+        // Writing timed out on a device that is not paired: the pairing request was not accepted (or not shown).
+        if (!ok && !bonded && stage.startsWith("writing")) authFail = true
+        EhLog.w("clip: Bluetooth send${if (kind.isEmpty()) "" else " of $kind"} to $name ${if (ok) "done" else "failed while $stage"}")
+        lastStage = stage
+        return Pair(ok, authFail)
     }
 
     /** Reads the name of the device behind an unknown Bluetooth LE id, once a minute at most per id. */
@@ -258,7 +303,7 @@ class ClipGatt(private val ctx: Context, private val selfName: String, private v
         }
     }
 
-    fun stop() { try { server?.close() } catch (e: Exception) { }; worker.shutdownNow() }
+    fun stop() { try { server?.close() } catch (e: Exception) { }; worker.shutdownNow(); workers.values.forEach { it.shutdownNow() }; workers.clear() }
 }
 
 /** Serves received clipboard images to other apps (the clipboard grants them read access when they paste). */
@@ -407,6 +452,19 @@ object ClipSync {
         }
         val p0 = prefs(app)
         gatt = ClipGatt(app, p0.getString("name", "phone") ?: "phone", p0.getString("secret", "") ?: "") { f -> receive(app, f, "Bluetooth") }.also { it.start() }
+        // A pairing just finished: the devices that refused for lack of pairing are tried over Bluetooth again at once.
+        // (The bond event names the identity address, which differs from the changing one the advertisements show.)
+        if (bondReceiver == null) bondReceiver = object : android.content.BroadcastReceiver() {
+            override fun onReceive(c: Context, i: Intent) {
+                if (i.getIntExtra(android.bluetooth.BluetoothDevice.EXTRA_BOND_STATE, -1) != android.bluetooth.BluetoothDevice.BOND_BONDED) return
+                val waiting = needsPairing()
+                if (waiting.isEmpty()) return
+                waiting.forEach { bluetoothPaired(it) }
+                EhLog.w("clip: a Bluetooth pairing finished, trying ${waiting.joinToString(", ")} over Bluetooth again")
+            }
+        }.also { r ->
+            try { app.registerReceiver(r, android.content.IntentFilter(android.bluetooth.BluetoothDevice.ACTION_BOND_STATE_CHANGED)) } catch (e: Exception) { }
+        }
         main.post {
             val cm = app.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
             listener?.let { try { cm.removePrimaryClipChangedListener(it) } catch (e: Exception) { } }
@@ -440,6 +498,7 @@ object ClipSync {
         HelperStarter.onShizukuReady { main.postDelayed({ watchHelper(app) }, 70_000) }
     }
 
+    @Volatile private var bondReceiver: android.content.BroadcastReceiver? = null
     @Volatile private var retryApp: Context? = null
     /** Once a second: sends unconfirmed clips again (after 5 and 15 s) and refreshes the receipt words. */
     private val retryTick: Runnable = object : Runnable {
@@ -477,19 +536,29 @@ object ClipSync {
         val skip = excluded(ctx)
         fun wanted(d: String) = d != name && (only?.contains(d) ?: (d !in skip))
         val links = ArrayList<String>()
-        var bleCarries = false
-        if (kind != "image" && mode != "wifi" && frame.size <= ClipGatt.MAX_FRAME) {
-            val now = System.currentTimeMillis()
-            val devs = EhState.bleDevices.filter { wanted(it.key) && now - it.value.second < 60_000 }.map { Pair(it.key, it.value.first) }
-            if (devs.isNotEmpty()) { gatt?.send(frame, devs); links += "Bluetooth"; bleCarries = true }
+        val now = System.currentTimeMillis()
+        val g = gatt
+        val bleNow = EhState.bleDevices.filter { now - it.value.second < 60_000 && g != null && g.health.usable(it.key, now) }
+        val wifiNow = (EhState.peers.keys + EhState.bleDevices.keys).filter { EhState.wifiHostsOf(it).isNotEmpty() }.toSet()
+        val wantedSet = (EhState.bleDevices.keys + wifiNow + EhState.peers.keys).filter { wanted(it) }.toSet()
+        val (viaBle, viaWifi) = ClipRoute.plan(kind, frame.size, mode, wantedSet, bleNow.keys, wifiNow, ClipGatt.MAX_FRAME)
+        if (viaBle.isNotEmpty() && g != null) {
+            // Bluetooth first; a device it cannot reach gets the same frame over Wi-Fi (the copies are recognised by id).
+            g.send(frame, viaBle.mapNotNull { d -> bleNow[d]?.let { Pair(d, it.first) } }, kind == "text" || kind == "link", kind) { d ->
+                if (mode != "ble") EhState.wifiHostsOf(d).forEach { tcp?.send(frame, it) }
+            }
+            links += "Bluetooth"
         }
-        if (mode != "ble" || !bleCarries) {
-            val hosts = if (only != null) only.flatMap { EhState.wifiHostsOf(it) }.distinct() else EhState.wifiPeers(skip)
-            hosts.forEach { tcp?.send(frame, it) }
-            if (hosts.isNotEmpty()) links += "Wi-Fi"
-        }
+        val hosts = viaWifi.flatMap { EhState.wifiHostsOf(it) }.distinct()
+        hosts.forEach { tcp?.send(frame, it) }
+        if (hosts.isNotEmpty()) links += "Wi-Fi"
         return links
     }
+
+    /** Bluetooth to that device paired (Android's bond state changed), so it is tried again at once. */
+    fun bluetoothPaired(name: String) { gatt?.health?.paired(name) }
+    /** Devices whose Bluetooth needs pairing again (status page). */
+    fun needsPairing(): List<String> = EhState.bleDevices.keys.filter { gatt?.health?.needsPairing(it) == true }
 
     /** A control message (receipt or diagnostics) to one device, or to all when [to] is null. */
     fun sendControl(ctx: Context, kind: String, data: ByteArray, to: String?) {
@@ -629,7 +698,7 @@ object ClipSync {
         EhLog.w("clip: copy noticed (helper)")
         if (method == "big" || text == null) {
             // Too long for the helper to pass on: read it with the invisible send screen ("Display over other apps").
-            try { app.startActivity(Intent(app, ClipActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK).putExtra("auto", true)) }
+            try { app.startActivity(Intent(app, ClipActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_NO_USER_ACTION).putExtra("auto", true)) }
             catch (e: Exception) { EhLog.w("clip: could not open the send screen: ${e.message}") }
             return
         }
@@ -731,12 +800,22 @@ object ClipSync {
         if (!line.contains("Deny", ignoreCase = true) && !line.contains("not in focus", ignoreCase = true)) return
         val now = System.currentTimeMillis()
         if (now - lastTrigger < 1200 || now - ownWriteAt < 2000 || !enabled(ctx) || !EhState.running) return
+        // Android clears the clipboard by itself an hour after the last copy, and that also shows as a denied read. It
+        // is not a copy: opening the send screen for it only interrupted the app on screen (seen 2026-11-08, exactly 60
+        // minutes after each clip).
+        if (ClipRules.isAutoClear(now, maxOf(lastTrigger, ownWriteAt))) {
+            lastTrigger = now
+            EhLog.w("clip: the clipboard was cleared by Android (an hour after the last copy), nothing to send")
+            return
+        }
         lastTrigger = now
         EhLog.w("clip: copy noticed (system log)")
         // Open the invisible send screen: as root, or directly (allowed with "Display over other apps").
-        if (watchRoot) RootShell.run("am start -n ${ctx.packageName}/.ClipActivity --ez auto true", 5)
+        // Not a user action (FLAG_ACTIVITY_NO_USER_ACTION, 0x00040000): otherwise the video app on screen takes it for the
+        // user leaving and goes into picture-in-picture by itself.
+        if (watchRoot) RootShell.run("am start -f 0x10040000 -n ${ctx.packageName}/.ClipActivity --ez auto true", 5)
         else try {
-            ctx.startActivity(Intent(ctx, ClipActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK).putExtra("auto", true))
+            ctx.startActivity(Intent(ctx, ClipActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_NO_USER_ACTION).putExtra("auto", true))
         } catch (e: Exception) { EhLog.w("clip: could not open the send screen: ${e.message}") }
     }
 
@@ -827,6 +906,14 @@ object ClipSync {
         }
     }
 
+    private val ackedAt = HashMap<String, Long>()
+    @Synchronized private fun receiptDue(id: String): Boolean {
+        val now = System.currentTimeMillis()
+        if (now - (ackedAt[id] ?: 0L) < 3000) return false
+        ackedAt[id] = now
+        if (ackedAt.size > 200) ackedAt.entries.removeIf { now - it.value > 60_000 }
+        return true
+    }
     @Synchronized private fun remember(id: String) { seen += id; while (seen.size > 100) seen.removeAt(0) }
     /** True the first time an id is seen (and records it), false for every later copy. */
     @Synchronized private fun firstTime(id: String): Boolean { if (id in seen) return false; remember(id); return true }
@@ -835,6 +922,13 @@ object ClipSync {
         val p = prefs(ctx)
         val item = ClipCodec.decode(frame, p.getString("secret", "") ?: "") ?: return
         val self = p.getString("name", "phone")
+        // A signed message that came over Bluetooth proves the encrypted link to that device works (it was paired
+        // again), so its Bluetooth wait ends at once.
+        gatt?.health?.let { h ->
+            if (via == "Bluetooth" && item.dev != self && (h.needsPairing(item.dev) || !h.usable(item.dev, System.currentTimeMillis()))) {
+                h.paired(item.dev); EhLog.w("clip: Bluetooth from ${item.dev} works, sending to it over Bluetooth again")
+            }
+        }
         if (item.dev == self || (item.to.isNotEmpty() && item.to != self)) return
         // Receipts and diagnostics work whatever the clipboard settings; clips only when receiving is on.
         val content = item.kind == "text" || item.kind == "image" || item.kind == "link"
@@ -843,8 +937,10 @@ object ClipSync {
         if (!ClockGuard.shared.fresh(item.dev, item.ts, System.currentTimeMillis(), ClipCodec.MAX_AGE_MS)) return
         // Checked and recorded in one step: the copies over Bluetooth LE and Wi-Fi can arrive at the same moment.
         if (!firstTime(item.id)) {
-            // A second copy (the other link, or a retry because the receipt was lost) is confirmed again.
-            if (content) sendControl(ctx, "ack", item.id.toByteArray(), item.dev)
+            // A second copy (the other link, or a retry because the receipt was lost) is confirmed again, but at most once
+            // every 3 s: on 2026-11-08 one clip arrived over and over during a stuck Bluetooth write, and a receipt for
+            // every copy built up 1,400 queued sends to the Mac.
+            if (content && receiptDue(item.id)) sendControl(ctx, "ack", item.id.toByteArray(), item.dev)
             return
         }
         when (item.kind) {

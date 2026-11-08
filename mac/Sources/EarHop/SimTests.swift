@@ -28,8 +28,13 @@ final class HandoffSim {
     var now = Date(timeIntervalSince1970: 1_700_000_000)
     var holder: String?
     var devs: [Dev] = []
-    var connectLatency = 1.5
-    var disconnectLatency = 0.5
+    /// Real switches took 4 to 12 s to connect (2026-11-08 logs); the timelines also run with 7 s (fix 6).
+    static var defaultConnect = 1.5
+    static var defaultDisconnect = 0.5
+    var connectLatency = HandoffSim.defaultConnect
+    var disconnectLatency = HandoffSim.defaultDisconnect
+    /// The earbuds reconnect by themselves to this device 0.5 s after the next release (once), as Galaxy Buds do.
+    var strayTo: String?
     private var timers: [(at: Date, run: () -> Void)] = []
 
     func add(_ name: String, toggle: Bool = false, _ tweak: (inout HandoffSettings) -> Void = { _ in }) -> Dev {
@@ -83,7 +88,13 @@ final class HandoffSim {
             case .release:
                 d.releases += 1
                 after(disconnectLatency) {
-                    if self.holder == d.name { self.holder = nil }
+                    if self.holder == d.name {
+                        self.holder = nil
+                        if let s = self.strayTo {
+                            self.strayTo = nil
+                            self.after(0.5) { if self.holder == nil { self.holder = s } }
+                        }
+                    }
                     d.core.releaseFinished(now: self.now)
                 }
             case .info, .safeMode: break
@@ -241,6 +252,26 @@ func runHandoffSimTests(_ check: (String, Bool) -> Void) {
         w.holder = "phone"; w.run(20)
         check("sim12 mac pauses once when the earbuds vanish", mac.pauses == 1 && !mac.playerOn)
         check("sim12 mac does not grab them back", w.holder == "phone" && mac.claims == 0)
+    }
+    // 13. The 2026-11-08 hop: the Mac lets go for the phone and the Buds reconnect by themselves to the idle tablet.
+    do {
+        let w = HandoffSim()
+        let mac = w.add("mac", toggle: true), phone = w.add("phone"), tab = w.add("tab")
+        w.holder = "mac"; w.userPlay(mac); w.run(5)
+        w.strayTo = "tab"
+        w.userPlay(phone); w.run(25)
+        check("sim13 the tablet hands on earbuds it did not ask for", tab.releases == 1 && tab.claims == 0)
+        check("sim13 the phone gets the earbuds", w.holder == "phone")
+        check("sim13 nobody else pauses", mac.pauses == 1 && tab.pauses == 0)
+    }
+    // 14. Connecting the earbuds by hand to an idle device is kept, also while another device plays without them.
+    do {
+        let w = HandoffSim()
+        let phone = w.add("phone"), tab = w.add("tab")
+        phone.gate = "quiet hours"
+        w.userPlay(phone); w.run(10)
+        w.holder = "tab"; w.run(20)
+        check("sim14 a manual connect is not undone", w.holder == "tab" && tab.releases == 0)
     }
     // Ear removal pause and resume, and low confidence readings never act.
     do {

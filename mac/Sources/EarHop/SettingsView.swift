@@ -565,7 +565,6 @@ private struct BudsPage: View {
                     Text("Noise cancelling needs both Buds in your ears unless Noise controls with one earbud is on in Galaxy Wearable.")
                 }
                 Section {
-                    if let v = b.spatial { Toggle("360 Audio", isOn: Binding(get: { v }, set: { link.setSpatial($0) })) }
                     if let v = b.touchOn { Toggle("Touch controls", isOn: Binding(get: { v }, set: { link.setTouch($0) })) }
                     if let v = b.seamless { Toggle("Quick connect (Samsung auto switch)", isOn: Binding(get: { v }, set: { link.setSeamless($0) })) }
                 } header: { Text("Options") } footer: {

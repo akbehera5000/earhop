@@ -390,6 +390,15 @@ Tooling notes:
 30. **Notification controls need "post notifications"** (Android 13 and later). Notification access (reading other apps)
     is a different permission. Without it Android hides the running service's notification from the shade.
 
+31. **Never queue Bluetooth sends for all devices on one thread.** One unreachable device (30 s per try) held up every
+    other device's clips. Keep a queue per device, `BleHealth` backoff, and Wi-Fi as the per-device fallback. Never
+    answer every duplicate with a receipt (one per clip per 3 s): a repeated delivery once built 1,400 sends.
+32. **Never start `su` per action.** Magisk shows a toast for every session. Use `RootShell.run` (one shared shell).
+33. **Automatic launches of `ClipActivity` must carry FLAG_ACTIVITY_NO_USER_ACTION**, or the app on screen (a video)
+    takes it for the user leaving and goes into picture-in-picture.
+34. **BLUETOOTH_SCAN stays `neverForLocation`.** Without it a background-restarted service hears nobody when location
+    is allowed only while in use.
+
 ## 10. Working rules from the owner
 
 * No em dashes anywhere, in chat or in files. Use commas, colons or full stops.
@@ -411,7 +420,7 @@ Tooling notes:
 * In app Bluetooth connect on the Mac (IOBluetooth `openConnection`) replaced blueutil as the first attempt and is not
   yet confirmed on the real earbuds.
 * MediaRemote explicit pause and play: confirmed accepted, effect not yet confirmed for every player (browsers).
-* Galaxy Buds controls (noise, equalizer, spatial audio, touch lock, Find My Buds) are untested on the real Buds.
+* Galaxy Buds controls (noise, equalizer, touch lock, Find My Buds) are untested on the real Buds.
 * The Buds frame offsets were never compared against GalaxyBudsClient or captured frames.
 * The Mac app is signed with a local certificate, not a Developer ID, so it is not notarized.
 * Android is `1.4.0` (versionCode 15, release build); the Mac is `1.4.0`.

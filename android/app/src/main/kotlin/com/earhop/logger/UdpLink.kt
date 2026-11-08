@@ -41,6 +41,7 @@ class UdpLink(
         EhLog.w("link: two devices are both named $dev. Give each device its own name (mac, phone, tab)")
     }
     private val rejectedAt = java.util.concurrent.ConcurrentHashMap<String, Long>()
+    private val sendFailedAt = java.util.concurrent.ConcurrentHashMap<String, Long>()
     private var nsd: NsdManager? = null
     private val resolveQueue = java.util.ArrayDeque<NsdServiceInfo>()
     private var resolving = false
@@ -188,7 +189,13 @@ class UdpLink(
             try {
                 s.send(DatagramPacket(data, data.size, t, port))
             } catch (e: Exception) {
-                EhLog.w("link: send to ${t.hostAddress} failed ${e.message}")
+                // Once a minute per address: without Wi-Fi this fails every second for every address.
+                val now = System.currentTimeMillis()
+                val key = t.hostAddress ?: ""
+                if (now - (sendFailedAt[key] ?: 0L) > 60_000) {
+                    sendFailedAt[key] = now
+                    EhLog.w("link: send to $key failed ${e.message} (repeats are not logged for a minute)")
+                }
             }
         }
     }
