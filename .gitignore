@@ -28,3 +28,8 @@ config.json
 
 # macOS
 .DS_Store
+
+# Windows build output
+windows/build/
+windows/*/bin/
+windows/*/obj/

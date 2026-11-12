@@ -237,11 +237,6 @@ struct ClipboardPage: View {
 
     @ObservedObject var state: AppState
     private var mode: ClipMode { ClipMode(rawValue: state.cfg.clipTransport) ?? .both }
-    private var others: [String] {
-        var names = NameBook.shared.all
-        for p in state.peers where !names.contains(p.name) && p.name != state.cfg.deviceName { names.append(p.name) }
-        return names.filter { $0 != state.cfg.deviceName }
-    }
 
     private func pauseFor(_ minutes: Int) {
         let until = Date().addingTimeInterval(Double(minutes) * 60)
@@ -253,15 +248,13 @@ struct ClipboardPage: View {
         Form {
             Section {
                 Toggle("Sync clipboard with my other devices", isOn: $state.cfg.clipSync)
-            } footer: {
-                Text("Always encrypted with your shared secret. Items your password manager marks as secret are never sent.")
+            } footer: { FootText("Always encrypted with your shared secret. Items your password manager marks as secret are never sent.")
             }
             Section {
                 ClipModePicker(state: state).padding(.vertical, 4)
                 ClipLinks(state: state)
                 Text(mode.explanation).font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-            } header: { Text("Method") } footer: {
-                Text("This is only for the clipboard. Earbud switching has its own setting on the Connection page. Clips from the other devices are accepted over either link.")
+            } header: { Text("Method") } footer: { FootText("This is only for the clipboard. Earbud switching has its own setting on the Connection page. Clips from the other devices are accepted over either link.")
             }
             .disabled(!state.cfg.clipSync)
             Section {
@@ -270,8 +263,7 @@ struct ClipboardPage: View {
                 Toggle("Include images (Wi-Fi)", isOn: $state.cfg.clipImages)
                 Toggle("Notify me when a clip arrives", isOn: $state.cfg.clipNotify)
                 Toggle("Skip password-like text", isOn: $state.cfg.clipSkipPasswords)
-            } header: { Text("Behaviour") } footer: {
-                Text("With automatic sending off, use Send now in the menu bar popover. Skip password-like text keeps copies that look like a password (one word, 8 to 64 characters, mixed kinds, never links or email addresses) on this Mac; off, they sync like any text. Items a password manager marks as concealed are never sent.")
+            } header: { Text("Behaviour") } footer: { FootText("With automatic sending off, use Send now in the menu bar popover. Skip password-like text keeps copies that look like a password (one word, 8 to 64 characters, mixed kinds, never links or email addresses) on this Mac; off, they sync like any text. Items a password manager marks as concealed are never sent.")
             }
             .disabled(!state.cfg.clipSync)
             Section {
@@ -287,22 +279,8 @@ struct ClipboardPage: View {
                         Button(app.name) { state.cfg.clipExcludeApps.append(app.id) }
                     }
                 }
-            } header: { Text("Exclude apps") } footer: {
-                Text("Copies made while one of these apps is in front stay on this Mac. The list offers the apps running now.")
+            } header: { Text("Exclude apps") } footer: { FootText("Copies made while one of these apps is in front stay on this Mac. The list offers the apps running now. Which devices get clips is set per device on the Devices page.")
             }
-            .disabled(!state.cfg.clipSync)
-            Section {
-                ForEach(others, id: \.self) { name in
-                    Toggle(isOn: Binding(
-                        get: { !state.cfg.clipExclude.contains(name) },
-                        set: { on in
-                            state.cfg.clipExclude.removeAll { $0 == name }
-                            if !on { state.cfg.clipExclude.append(name) }
-                        })) {
-                        Label(DeviceName.pretty(name), systemImage: DeviceName.symbol(name))
-                    }
-                }
-            } header: { Text("Send to") }
             .disabled(!state.cfg.clipSync)
             Section {
                 TextField("Search clips", text: $state.clipSearch)
@@ -317,8 +295,7 @@ struct ClipboardPage: View {
                 if !state.clipRecent.isEmpty {
                     Button("Clear recent clips") { state.clipRecent = [] }
                 }
-            } header: { Text("History") } footer: {
-                Text("History is kept in memory only and is gone when EarHop quits. Pinned clips (the pin button) are kept, encrypted with your shared secret. Click a clip to copy it again.")
+            } header: { Text("History") } footer: { FootText("History is kept in memory only and is gone when EarHop quits. Pinned clips (the pin button) are kept, encrypted with your shared secret. Click a clip to copy it again.")
             }
             .disabled(!state.cfg.clipSync)
             Section {
@@ -341,8 +318,7 @@ struct ClipboardPage: View {
                     Button("Send clipboard now") { state.onClipSend?() }.glassButton(prominent: true)
                     Spacer()
                 }
-            } header: { Text("Status") } footer: {
-                Text("On the phone, automatic sending needs the EarHop clipboard helper (started once from a computer, and again after the phone restarts). The tablet uses root. Without either, Android sends with the Send clipboard tile, the notification button or Share.")
+            } header: { Text("Status") } footer: { FootText("On the phone, automatic sending needs the EarHop clipboard helper (started once from a computer, and again after the phone restarts). The tablet uses root. Without either, Android sends with the Send clipboard tile, the notification button or Share.")
             }
             .disabled(!state.cfg.clipSync)
         }

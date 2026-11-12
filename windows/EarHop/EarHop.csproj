@@ -1,0 +1,34 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- EarHop for Windows 10 (2004) and 11: tray app. Built on the Mac or Windows with windows/build.sh or
+       "dotnet publish -c Release" (one EarHop.exe, no .NET install needed on the PC). -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
+    <SupportedOSPlatformVersion>10.0.19041.0</SupportedOSPlatformVersion>
+    <UseWindowsForms>true</UseWindowsForms>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>EarHop.Win</RootNamespace>
+    <AssemblyName>EarHop</AssemblyName>
+    <Version>1.4.1</Version>
+    <Product>EarHop</Product>
+    <ApplicationIcon>EarHop.ico</ApplicationIcon>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <DebugType>none</DebugType>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../EarHop.Core/EarHop.Core.csproj" />
+    <!-- MIT licensed (github.com/naudio/NAudio): Core Audio sessions, peak meters and endpoints. -->
+    <PackageReference Include="NAudio.Wasapi" Version="2.2.1" />
+  </ItemGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="EarHop.ico" />
+  </ItemGroup>
+</Project>

@@ -104,6 +104,10 @@ final class AppState: ObservableObject {
     var onRelease: (() -> Void)?
     var onRestart: (() -> Void)?
     var onOpenSettings: (() -> Void)?
+    /// Asks the Settings window to show a page (set by the popover or another page; cleared once shown).
+    @Published var settingsPageRequest: SettingsPage?
+    /// The page the Settings window shows now (for its title).
+    var onSettingsPage: ((SettingsPage) -> Void)?
 
     /// Values read once at launch. Changing them needs a restart.
     private let startup: (Int, String, Int, Bool, [Int], String)
@@ -129,6 +133,8 @@ final class AppState: ObservableObject {
     }
 
     func refreshPaired() {
+        // Test runs (EARHOP_NO_BT) have no Bluetooth permission; asking would make macOS stop the process.
+        guard ProcessInfo.processInfo.environment["EARHOP_NO_BT"] == nil else { return }
         DispatchQueue.main.async { self.paired = BlueUtil.paired() }
     }
 }

@@ -19,8 +19,8 @@ android {
         applicationId = "com.earhop.logger"
         minSdk = 26
         targetSdk = 34
-        versionCode = 15
-        versionName = "1.4.0"
+        versionCode = 16
+        versionName = "1.4.1"
     }
 
     signingConfigs {
@@ -58,5 +58,8 @@ dependencies {
     implementation("dev.rikka.shizuku:provider:13.1.5")
     // ZXing Android Embedded (Apache-2.0): scans the Mac's pairing QR code inside EarHop.
     implementation("com.journeyapps:zxing-android-embedded:4.3.0")
+    // The scanner calls androidx.core (ContextCompat) but does not bring it along; without it the camera screen crashed
+    // on opening (NoClassDefFoundError, 2026-11-13). Its BarcodeEncoder also draws this device's pairing QR code.
+    implementation("androidx.core:core:1.12.0")
     testImplementation("junit:junit:4.13.2")
 }

@@ -6,6 +6,8 @@
     <key>CFBundleName</key><string>EarHop</string>
     <key>CFBundleVersion</key><string>1</string>
     <key>LSUIElement</key><true/>
+    <key>NSCameraUsageDescription</key>
+    <string>EarHop uses the camera only while you scan another device's pairing QR code. Nothing is recorded or sent.</string>
     <key>NSBluetoothAlwaysUsageDescription</key>
     <string>EarHop reads the AirPods in-ear beacon to detect when they are worn.</string>
     <key>NSLocalNetworkUsageDescription</key>

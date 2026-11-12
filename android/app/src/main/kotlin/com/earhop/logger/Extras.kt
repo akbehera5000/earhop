@@ -106,6 +106,13 @@ class Extras(private val ctx: Context) {
                 remoteCharging = Triple(p[3] == "1", p[4] == "1", p[5] == "1")
             }
             "vol" -> text.toFloatOrNull()?.let { remoteVol = Triple(item.dev, it, System.currentTimeMillis()) }
+            "hello" -> {
+                // Another device says what it is (Mac, Windows PC, tablet, ...), for its icon here.
+                val k = Hello.decode(item.data) ?: return
+                if (!DeviceNames.valid(item.dev)) return
+                NameBook.add(item.dev)
+                if (DeviceBook.setAnnounced(ctx, item.dev, k)) EhLog.w("devices: ${item.dev} is a ${k.title}")
+            }
             "settings" -> {
                 val apply = SettingsSync.merge(SettingsSync.stamps(ctx), SettingsSync.decode(item.data), ClockGuard.shared.offset(item.dev) ?: 0L,
                     SettingsSync.values(ctx), System.currentTimeMillis())
@@ -213,7 +220,14 @@ class Extras(private val ctx: Context) {
         val newPeer = (peersNow - sharedPeers).isNotEmpty()
         sharedPeers = peersNow
         if (changed || newPeer || now - sharedAt > 300_000) { sharedAt = now; ClipSync.sendControl(ctx, "settings", SettingsSync.encode(ctx), null) }
+        // Tell the others what this device is (phone or tablet): at start, when a device joins, and every 10 minutes.
+        if (newPeer || now - helloAt > 600_000) {
+            helloAt = now
+            val version = try { ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName ?: "" } catch (e: Exception) { "" }
+            ClipSync.sendControl(ctx, "hello", Hello.encode(DeviceBook.selfKind(ctx), "android", version), null)
+        }
     }
+    private var helloAt = 0L
 
     /** The sleep timer: when it ends, pause and let go of the earbuds. */
     fun sleepTick(owner: Boolean, controller: HandoffController?) {

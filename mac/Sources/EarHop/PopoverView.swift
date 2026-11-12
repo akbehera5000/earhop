@@ -47,11 +47,13 @@ struct PopoverView: View {
         GlassGroup {
             VStack(spacing: 10) {
                 topBar
+                earbudsPicker
                 banners
                 hero
                 earbudsCard
                 HStack(spacing: 10) { switchingTile; clipTile }
-                if !state.peers.isEmpty { devicesRow }
+                devicesGrid
+                footer
             }
         }
         .padding(12)
@@ -77,7 +79,6 @@ struct PopoverView: View {
                 Text(state.cfg.isBuds ? "Galaxy Buds2 Pro" : "AirPods Pro 2").font(.headline)
                 Text(whereText).font(.caption).foregroundStyle(.secondary)
             }
-            .accessibilityElement(children: .combine)
             Spacer(minLength: 6)
             Text(stateWord)
                 .font(.caption.weight(.semibold))
@@ -85,25 +86,23 @@ struct PopoverView: View {
                 .padding(.horizontal, 9).padding(.vertical, 4)
                 .glassCapsule()
                 .contentTransition(.opacity)
-            Menu {
-                Picker("Earbuds", selection: earbudsChoice) {
-                    Text("Automatic").tag("auto"); Text("AirPods").tag("airpods"); Text("Galaxy Buds").tag("buds")
-                }
-                .pickerStyle(.inline)
-                Toggle("Live (act on decisions)", isOn: $state.cfg.liveMode)
-                Divider()
-                if let last = state.history.first(where: { $0.kind == .claim || $0.kind == .release }), !last.dry {
-                    Button("Undo: \(last.text)") { state.onUndo?() }
-                }
-                Button("Settings…") { state.onOpenSettings?() }.keyboardShortcut(",", modifiers: .command)
-                Button("Copy log") { Log.copyToPasteboard() }
-                Divider()
-                Button("Quit EarHop") { NSApp.terminate(nil) }.keyboardShortcut("q")
-            } label: { Image(systemName: "ellipsis.circle").font(.title3) }
-                .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
-                .accessibilityLabel("More: earbuds, live mode, settings, quit")
         }
         .padding(.horizontal, 4)
+    }
+
+    /// Which earbuds EarHop moves, as a horizontal selector like the one in Settings, Earbuds.
+    private var earbudsPicker: some View {
+        Picker("Earbuds", selection: earbudsChoice) {
+            Text("Automatic").tag("auto")
+            Text("AirPods").tag("airpods")
+            Text("Galaxy Buds").tag("buds")
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .controlSize(.small)
+        .padding(.horizontal, 4)
+        .help("Automatic follows the pair connected here, or the pair the device holding the earbuds reports")
+        .accessibilityLabel("Earbuds")
     }
 
     @ViewBuilder private var banners: some View {
@@ -179,6 +178,7 @@ struct PopoverView: View {
                 note("pause.circle", .secondary, "Not switching: \(h).")
             }
             actions
+            lastSwitch
         }
         .padding(12)
         .glassCard(cornerRadius: 22)
@@ -356,24 +356,98 @@ struct PopoverView: View {
 
     // MARK: devices
 
-    private var devicesRow: some View {
-        HStack(spacing: 10) {
-            ForEach(state.peers) { p in
-                HStack(spacing: 5) {
-                    Image(systemName: DeviceName.symbol(p.name)).font(.caption)
-                    Text(DeviceName.pretty(p.name)).font(.caption.weight(.medium)).lineLimit(1)
-                    if p.call { Image(systemName: "phone.fill").font(.caption2).foregroundStyle(.green) }
-                    else if p.playing { Image(systemName: "waveform").font(.caption2).foregroundStyle(.secondary) }
-                }
-                .padding(.horizontal, 9).padding(.vertical, 5)
-                .overlay(Capsule().strokeBorder(p.owner ? Color.green.opacity(0.8) : Color.clear, lineWidth: 1.2))
-                .glassCapsule()
-                .springy()
-                .help("\(DeviceName.pretty(p.name)): \(p.owner ? "has the earbuds, " : "")\(p.playing ? "playing" : "idle"), over \(p.via == "ble" ? "Bluetooth LE" : "Wi-Fi")")
-                .accessibilityElement(children: .combine)
-            }
-            Spacer(minLength: 0)
+    /// Every device, as many as there are: a grid that wraps, devices heard now first. The green outline marks the one
+    /// with the earbuds; a dimmed chip is a known device not heard for a while.
+    private var deviceNames: [String] {
+        let me = state.cfg.deviceName
+        let live = state.peers.map(\.name)
+        var all = live
+        for n in state.cfg.priority + state.cfg.knownDevices where n != me && !all.contains(n) && state.status.devices.contains(where: { $0.name == n }) {
+            all.append(n)
         }
+        return all
+    }
+
+    private var devicesGrid: some View {
+        let names = deviceNames
+        return VStack(alignment: .leading, spacing: 6) {
+            if names.isEmpty {
+                HStack(spacing: 8) {
+                    Image(systemName: "laptopcomputer.and.iphone").foregroundStyle(.secondary)
+                    Text("No other device yet.").font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Add a Device") { openSettings(.pairing) }.buttonStyle(.link).font(.caption)
+                }
+                .padding(.horizontal, 4)
+            } else {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 96), spacing: 8)], alignment: .leading, spacing: 8) {
+                    ForEach(names, id: \.self) { n in deviceChip(n) }
+                }
+            }
+        }
+    }
+
+    private func deviceChip(_ n: String) -> some View {
+        let p = state.peers.first { $0.name == n }
+        let live = p != nil
+        return Button { openSettings(.devices) } label: {
+            HStack(spacing: 5) {
+                Image(systemName: DeviceName.symbol(n)).font(.caption)
+                Text(DeviceName.pretty(n)).font(.caption.weight(.medium)).lineLimit(1).truncationMode(.tail)
+                if p?.call == true { Image(systemName: "phone.fill").font(.caption2).foregroundStyle(.green) }
+                else if p?.playing == true { Image(systemName: "waveform").font(.caption2).foregroundStyle(.secondary) }
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 9).padding(.vertical, 5)
+            .frame(maxWidth: .infinity)
+            .opacity(live ? 1 : 0.5)
+            .overlay(Capsule().strokeBorder(p?.owner == true ? Color.green.opacity(0.8) : Color.clear, lineWidth: 1.2))
+            .glassCapsule()
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .springy()
+        .help(live ? "\(DeviceName.pretty(n)), \(DeviceName.kind(n).title): \(p!.owner ? "has the earbuds, " : "")\(p!.playing ? "playing" : "idle"), over \(p!.via == "ble" ? "Bluetooth LE" : "Wi-Fi")"
+                   : "\(DeviceName.pretty(n)), \(DeviceName.kind(n).title): not heard right now")
+        .accessibilityLabel("\(DeviceName.pretty(n)), \(live ? (p!.owner ? "has the earbuds" : p!.playing ? "playing" : "idle") : "away")")
+    }
+
+    // MARK: last switch and footer
+
+    /// The last switch in a line, with Undo while it is recent (10 minutes).
+    @ViewBuilder private var lastSwitch: some View {
+        if let last = state.history.first(where: { $0.kind == .claim || $0.kind == .release }), !last.dry,
+           Date().timeIntervalSince(last.date) < 600, !switching {
+            HStack(spacing: 6) {
+                Image(systemName: last.kind == .claim ? "arrow.down.circle" : "arrow.up.circle").foregroundStyle(.secondary)
+                Text(last.text).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail)
+                Spacer(minLength: 4)
+                Button("Undo") { state.onUndo?() }.buttonStyle(.link).font(.caption)
+                    .help(last.kind == .claim ? "Give the earbuds back" : "Take the earbuds back")
+            }
+        }
+    }
+
+    /// Settings, Copy log and Quit, as a quiet row at the bottom like other menu bar apps.
+    private var footer: some View {
+        HStack(spacing: 14) {
+            Button { state.onOpenSettings?() } label: { Label("Settings", systemImage: "gearshape") }
+                .keyboardShortcut(",", modifiers: .command)
+            Button { Log.copyToPasteboard(); state.clipStatus = "Log copied"; state.clipAt = Date() } label: { Label("Copy Log", systemImage: "doc.on.doc") }
+            Spacer()
+            Button { NSApp.terminate(nil) } label: { Label("Quit", systemImage: "power") }
+                .keyboardShortcut("q")
+        }
+        .buttonStyle(.plain)
+        .font(.caption)
+        .foregroundStyle(.secondary)
+        .labelStyle(.titleAndIcon)
+        .padding(.horizontal, 6).padding(.top, 2)
+    }
+
+    private func openSettings(_ page: SettingsPage) {
+        state.settingsPageRequest = page
+        state.onOpenSettings?()
     }
 
     // MARK: pieces
@@ -428,16 +502,6 @@ struct PopoverView: View {
         case .pause, .resume: return .secondary
         default: return .secondary
         }
-    }
-}
-
-/// Friendly names and symbols for the protocol device names.
-enum DeviceName {
-    static func pretty(_ n: String) -> String {
-        switch n { case "mac": return "Mac"; case "phone": return "Phone"; case "tab": return "Tablet"; default: return n.prefix(1).uppercased() + n.dropFirst() }
-    }
-    static func symbol(_ n: String) -> String {
-        switch n { case "phone": return "iphone"; case "tab": return "ipad.landscape"; default: return "laptopcomputer" }
     }
 }
 

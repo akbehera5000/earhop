@@ -71,6 +71,17 @@ final class NameBook {
         return true
     }
 
+    /// Forgets a name learned earlier (Settings, Devices, Forget). mac, phone and tab always stay.
+    func remove(_ n: String) {
+        guard !["mac", "phone", "tab"].contains(n) else { return }
+        lock.lock()
+        names.removeAll { $0 == n }
+        ids = ids.filter { $0.value != n }
+        let all = names
+        lock.unlock()
+        onChange?(all)
+    }
+
     func name(for id: Int) -> String? { lock.lock(); defer { lock.unlock() }; return ids[id] }
     var all: [String] { lock.lock(); defer { lock.unlock() }; return names }
 }

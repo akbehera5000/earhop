@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Platform independent part of EarHop for Windows: protocol, switching rules, clipboard codec. Builds and is tested
+       on any OS (windows/EarHop.Tests runs on the Mac). Same rules as mac/Sources/EarHop and the Android app. -->
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>EarHop</RootNamespace>
+  </PropertyGroup>
+</Project>

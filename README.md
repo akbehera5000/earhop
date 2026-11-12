@@ -8,9 +8,10 @@ entirely on your local network: no cloud, no account.
 | --- | --- |
 | Mac (macOS 13 or later, Liquid Glass on macOS 26 and later) | `mac/`, a menu bar app |
 | Android phones and tablets (root optional) | `android/`, an app with a foreground service |
+| Windows 10 (2004 or later) and 11, 64 bit | `windows/`, a tray app (new, not yet tried on a real PC) |
 
-Any number of devices can join, each with its own name. Windows and Linux apps do not exist yet; `docs/PORTING.md`
-describes everything one needs.
+Any number of devices can join, each with its own name. A Linux app does not exist yet; `docs/PORTING.md` describes
+everything one needs.
 
 ## How switching works
 
@@ -82,6 +83,29 @@ All tests at once: `bash tests/run.sh`.
 5. **Android permissions:** Nearby devices, Location (Android needs it for Bluetooth scans), Location switched on,
    Notifications, and Battery set to *No restrictions* (essential on some phones). Notification access and root are optional.
 6. Press **Start** on Android and turn on **Live** on the Mac (off is a dry run that only logs decisions).
+
+## Windows
+
+`dist/EarHop-Windows-1.4.1.exe` is one file; it needs no install and no .NET.
+
+1. **Pair the earbuds with the PC once** in Settings, Bluetooth and devices. EarHop then connects and disconnects them
+   itself, the way the Sound settings Connect button does.
+2. **Start EarHop.exe.** Windows SmartScreen may warn about an unknown publisher (the file is not signed): More info,
+   Run anyway. When Windows Firewall asks, allow EarHop on **private** networks (it uses UDP 47474 and TCP 47475).
+3. **Settings opens by itself the first time.** Give the PC its own name (for example `pc`), paste the secret from the
+   Mac (Settings, Network: copy the secret or its `earhop://pair` link), pick the earbuds, and Save.
+4. **Set Connection to Both on your other devices.** The PC sends its status over Wi-Fi only (it listens to Bluetooth
+   but does not advertise yet), and a device set to Bluetooth only ignores Wi-Fi status.
+5. The EarHop icon sits in the tray (click the ^ next to the clock to find it). Its menu shows the state, your devices,
+   Take and Release, Automatic switching, Send clipboard now, Send files, Settings, Copy diagnostics and the log folder.
+   Files can also be sent from Explorer: right click, Send to, **EarHop (send to a device)**.
+
+What the Windows app does not do yet: ear detection (it never pauses when you take an earbud out; it switches as if
+the earbuds are in), Bluetooth status advertising and Bluetooth clipboard (Wi-Fi only), Galaxy Buds controls,
+battery levels, volume handover and shared settings. Log: `%APPDATA%\EarHop\earhop.log`.
+
+Build it on the Mac: `bash windows/build.sh` (needs the .NET 8 SDK from Microsoft's `dotnet-install.sh` in `~/.dotnet`;
+the Homebrew build cannot target Windows).
 
 ## Permissions explained
 
@@ -182,6 +206,8 @@ Common problems:
 mac/Sources/EarHop/   HandoffCore (state machine), Controller (runs it), SimTests (simulator), UI, Bluetooth, network
 android/app/src/main/kotlin/com/earhop/logger/   HandoffCore, HandoffController, EarService, UI, Bluetooth, network
 android/app/src/test/kotlin/com/earhop/logger/   HandoffSimTest, EarPolicyTest, BudsProtocolTest, AutoGateTest
+windows/EarHop.Core/  HandoffCore, protocol, clipboard codec, Wi-Fi link (any OS); EarHop.Tests runs them on the Mac
+windows/EarHop/       the Windows tray app: Core Audio, Bluetooth audio connect, media control, clipboard, UI
 tools/earhop_tool.py  protocol reference: selftest, listen, send
 tests/run.sh          runs every automated test
 HANDOFF.md            engineering notes, history, open problems

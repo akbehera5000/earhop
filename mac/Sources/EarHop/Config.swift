@@ -79,6 +79,11 @@ struct Config: Codable, Equatable {
     var clipExcludeApps: [String] = []
     /// Every device name seen so far (besides mac, phone and tab), so Bluetooth LE ids are known after a restart.
     var knownDevices: [String] = []
+    /// What kind of device each name is, as the device announced it ("hello" message): mac, phone, tablet, iphone, ipad,
+    /// windows, linux, other. Shown as icons; never sent anywhere.
+    var deviceKinds: [String: String] = [:]
+    /// Kinds chosen by hand in Settings, Devices; they win over the announced ones.
+    var deviceKindOverrides: [String: String] = [:]
     /// Recent clips kept in the popover (memory only); 0 turns the list off.
     var clipHistory: Int = 10
     /// Automatic earbud switching. Off: only Take and Release move the earbuds.
@@ -124,6 +129,7 @@ struct Config: Codable, Equatable {
         opt(.clipAuto, &base.clipAuto); opt(.clipReceive, &base.clipReceive); opt(.clipExclude, &base.clipExclude)
         opt(.clipNotify, &base.clipNotify); opt(.clipHistory, &base.clipHistory)
         opt(.clipSkipPasswords, &base.clipSkipPasswords); opt(.knownDevices, &base.knownDevices)
+        opt(.deviceKinds, &base.deviceKinds); opt(.deviceKindOverrides, &base.deviceKindOverrides)
         opt(.clipExcludeApps, &base.clipExcludeApps)
         opt(.followAttention, &base.followAttention); opt(.lowBatteryAlerts, &base.lowBatteryAlerts)
         opt(.volumeHandover, &base.volumeHandover); opt(.ownBudsSettings, &base.ownBudsSettings)

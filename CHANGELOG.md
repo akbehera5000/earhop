@@ -1,5 +1,81 @@
 # Changelog
 
+## 2026-11-13: Mac popover earbuds selector, stuck menu bar tooltip
+
+* Popover: the earbuds choice (Automatic, AirPods, Galaxy Buds) is a horizontal selector under the header, like
+  Settings, Earbuds, instead of a menu on the name.
+* Fixed: the menu bar tooltip "EarHop (live)" could stay stuck to the pointer after opening the popover. The button's
+  image, title and tooltip were set again four times a second; while macOS showed that tooltip, the popover opening
+  left its window behind. The button now has no tooltip (VoiceOver reads the same words as its label) and is only
+  changed when what it shows changes.
+
+## 2026-11-13: Android Devices page for any number of devices, pairing QR, scanner crash
+
+* Fixed: Scan QR code crashed EarHop as the camera opened (NoClassDefFoundError: androidx.core.content.ContextCompat,
+  seen twice in the phone's crash log). The scanner library uses androidx.core without bringing it; it is now a
+  dependency (`androidx.core:core:1.12.0`). Checked on the phone: the scanner opens and asks for the camera.
+* Devices page: This device (name, and the kind it announces), Pairing (secret with Show and Hide, Scan QR code,
+  Show my QR code, Paste, Copy pairing link, Save), Your devices (every device known, any number, with icon, kind,
+  state and link; green ring while heard), switching link, status and tiles.
+* Tap a device for its type (automatic from its hello, or chosen), clipboard and files on or off, Move up or down in
+  priority, and Forget. The priority list now takes any device name (it was limited to mac, tab and phone), so the
+  Settings rule list and the Clipboard "Send to" card point to Devices instead.
+* Show my QR code draws this device's pairing code (zxing BarcodeEncoder, screen brightened while shown), so a new phone,
+  tablet or the Mac's Scan With Camera can pair from it.
+* Home, Your devices: this device plus every device heard in the last 10 minutes; more than three scroll sideways.
+* Polish after testing on the phone: Hide works again (the check read the input type, whose "visible password" bits
+  include the "password" bits, so it never saw the secret as shown; now a flag), Scan QR code is a plain button (Save
+  is the one main action), the QR code, device details and type picker are app-style panels (graphite card over the
+  blurred page, rising from the bottom on phones, centred on tablets) instead of the system's light dialogs, and the
+  scanner follows how the device is held (`fullUser` in place of the library's fixed landscape). Checked on the phone:
+  Show then Hide, the three panels, the scanner upright, no crash.
+* Android sends the "hello" message (phone or tablet by screen size) at start, when a device joins and every 10
+  minutes, and saves what others announce. Checked: the Mac logged "phone is a Android phone" and "tab is a Android
+  tablet". New `Devices.kt` (DeviceKind, DeviceBook, Hello) and `DevicesTest` (kind guesses, ids shared with the Mac,
+  names).
+
+## 2026-11-13: Mac Settings and popover redesign, any number of devices
+
+* Settings has nine pages, each setting on exactly one: General, Devices, Earbuds, Switching, Clipboard, Pairing,
+  Connection, History, Log. The sidebar uses coloured icon tiles like System Settings, section notes are left aligned,
+  and the window title names the page. The Buds controls moved into Earbuds (they were split over AirPods and Buds),
+  Network and Status became Pairing and Connection, Apps moved into Switching, and the duplicated "calls" switches
+  are one ("Calls and meetings come first").
+* Devices page: every device ever heard, any number and any kind, in priority order (up and down arrows), with its icon,
+  kind, link and last heard. Details opens a sheet per device: type (automatic or chosen), send clipboard and files to
+  it, links and clock, Forget.
+* Device kinds: a new "hello" control message (`{"type","app","version"}`, encrypted like a clip) tells the others what a
+  device is (mac, phone, tablet, iphone, ipad, windows, linux, other). The Mac sends it at start, when a device joins
+  and every 10 minutes, and saves what others announce (`deviceKinds`; hand-picked kinds in `deviceKindOverrides`).
+  Devices that never announce get a guess from their name. Older apps ignore the message, so nothing else changes.
+* Pairing: Scan With Camera reads another device's pairing QR code with the Mac's camera (Core Image, nothing saved;
+  `NSCameraUsageDescription` added), Paste Pairing Link and Copy Pairing Link, and New Secret now asks first.
+* Popover: the ... menu is gone. The earbuds name is the switcher (Automatic, AirPods, Galaxy Buds2 Pro), Undo sits
+  next to the last switch for 10 minutes, Settings, Copy Log and Quit are a footer row, and Live moved to Settings,
+  Switching, Testing. The device row is a wrapping grid of every device heard since start (dimmed when away); a chip
+  opens Settings, Devices.
+* Test mode no longer reads the paired Bluetooth list (macOS stopped the snapshot run for it). `--snapshot` now also
+  renders the popover with six devices and every Settings page. Self test: hello, kind guesses, iPhone spelling.
+
+## 2026-11-12: EarHop for Windows (new, not yet tried on a real PC)
+
+* New `windows/` app for Windows 10 (2004) and 11: a tray app built with .NET 8 and published as one self-contained
+  `dist/EarHop-Windows-1.4.1.exe`. Built on the Mac with `windows/build.sh`.
+* `windows/EarHop.Core` is a line by line port of HandoffCore, the v4 protocol (Wi-Fi packet, Bluetooth LE payload,
+  ClockGuard, PeerOrder, NameBook), the clipboard codec, file streams and receipts. `windows/EarHop.Tests` runs on the
+  Mac: every protocol vector from AGENTS.md, the Mac's and Android's clipboard frames, every simulator timeline (also
+  with the real Buds timing), a PC without an ear reading, and real UDP, clip and file transfers over loopback
+  (140 checks). `tests/run.sh` runs it when the .NET SDK is installed.
+* Windows specifics: playing means an app's audio session produced sound in the last 2 s (a paused browser is silent,
+  so it does not count); a call means the microphone is in use while playing, for 2 s; the earbuds are connected and
+  released through the Bluetooth audio driver's one-shot connect and disconnect (KSPROPSETID_BtAudio, what the Sound
+  settings Connect button uses); Pause and Play are explicit, through Windows media sessions, and Play goes only to the
+  apps EarHop paused. No ear reading yet, so an unknown ear counts as in (`requireEar` off, like Android).
+* Clipboard and files over Wi-Fi only: text, images, links, files (Send files in the tray menu, Explorer's Send to,
+  a "Send to" panel with round device buttons), receipts and diagnostics replies. Items marked private by password
+  managers are never sent. The PC listens to Bluetooth LE status but does not advertise its own, so the other devices
+  need Connection set to Both.
+
 ## 2026-11-08: Mac Share menu and file notifications
 
 * Mac: EarHop is in the Share menu (Finder, Preview and other apps). A small sandboxed extension

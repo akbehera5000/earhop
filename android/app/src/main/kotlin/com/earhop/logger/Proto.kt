@@ -56,6 +56,14 @@ object NameBook {
         return true
     }
 
+    /** Forgets a learned name (Devices, Forget). mac, phone and tab always stay. */
+    @Synchronized fun remove(n: String) {
+        if (n in setOf("mac", "phone", "tab")) return
+        names.remove(n)
+        ids.entries.removeIf { it.value == n }
+        onChange?.invoke(names.toList())
+    }
+
     fun name(id: Int): String? = ids[id]
     val all: List<String> get() = names.toList()
 }

@@ -29,6 +29,7 @@ import android.view.ViewGroup
 import android.widget.Button
 import android.widget.EditText
 import android.widget.FrameLayout
+import android.widget.HorizontalScrollView
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
@@ -744,7 +745,13 @@ class MainActivity : Activity() {
 
         val strip = card("Your devices")
         stripBox = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        strip.addView(stripBox)
+        // Any number of devices: up to three share the width, more scroll sideways.
+        strip.addView(HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            isFillViewport = true
+            overScrollMode = View.OVER_SCROLL_NEVER
+            addView(stripBox, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        })
 
         val homeClip = card("Clipboard")
         homeClipText = text("", 14f, textC)
@@ -908,17 +915,10 @@ class MainActivity : Activity() {
         recentBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         recent.addView(recentBox)
 
+        // Which devices get clips is set per device on the Devices page (tap a device), so it works for any number.
         val sendTo = card("Send to")
-        val self = prefs.getString("name", "phone") ?: "phone"
-        val others = NameBook.all.filter { it != self }
-        others.forEachIndexed { i, dev ->
-            if (i > 0) divider(sendTo)
-            switchRow(sendTo, pretty(dev), null, { dev !in ClipSync.excluded(this) }) { on ->
-                val now = ClipSync.excluded(this).toMutableSet()
-                if (on) now.remove(dev) else now.add(dev)
-                prefs.edit().putStringSet("clipExclude", now).apply()
-            }
-        }
+        sendTo.addView(text("Clips and files go to every paired device. To leave one out, open Devices and tap it.", 13f, subC))
+        buttons(sendTo, button("Open Devices", false) { showPage("Devices") }, top = 10)
 
         val exclude = card("Exclude apps", "Copies noticed in these apps stay on this device. EarHop knows the app when the accessibility trigger saw the copy; with other methods the app is not known.")
         val excludeBtn = button("", false) { }
@@ -941,16 +941,55 @@ class MainActivity : Activity() {
 
     private fun buildDevicesPage() {
         root = pages.getValue("Devices")
-        val peers = card("Other devices")
+        val setup = card("This device", "Every device needs its own name, for example phone, tab or phone2 (lower case letters, digits and -, up to 20).")
+        val pairedSecret = intent?.data?.takeIf { it.scheme == "earhop" }?.getQueryParameter("secret")
+        // Tablets default to "tab" so a phone and a tablet never share the default name.
+        val defaultName = if (resources.configuration.smallestScreenWidthDp >= 600) "tab" else "phone"
+        nameField = field(setup, "Name", prefs.getString("name", defaultName) ?: defaultName)
+        buttons(setup, button("phone", false) { nameField.setText("phone") }, button("tab", false) { nameField.setText("tab") }, top = 8)
+        setup.addView(text("Shown to your other devices as ${DeviceBook.selfKind(this).title.lowercase().replaceFirstChar { it.uppercase() }}.", 12.5f, subC)
+            .apply { setPadding(dp(2), dp(10), 0, 0) })
+
+        val pair = card("Pairing", "Every device uses the same secret; it signs and encrypts everything they send each other. Treat it like a password. " +
+            "Scan the QR code on the Mac (Settings, Pairing) or on another phone or tablet, or show this device's code for a new one to scan.")
+        pair.addView(text("Shared secret", 13f, subC).apply { setPadding(dp(2), 0, 0, dp(4)) })
+        val secretRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        secretField = EditText(this).apply {
+            setText(pairedSecret ?: prefs.getString("secret", "") ?: "")
+            setTextColor(textC); setHintTextColor(subC); textSize = 16f
+            background = g.input(); setPadding(dp(14), dp(11), dp(14), dp(11)); setSingleLine()
+            hint = "Paste or scan the secret"
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+            typeface = Typeface.MONOSPACE
+        }
+        secretRow.addView(secretField, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        // A flag, not the input type: VISIBLE_PASSWORD shares the PASSWORD bits, so testing the bits never saw "shown"
+        // and Hide did nothing (2026-11-13).
+        var shown = false
+        val eye = button("Show", false) { }
+        eye.setOnClickListener {
+            tap(it)
+            shown = !shown
+            val sel = secretField.selectionEnd
+            secretField.inputType = InputType.TYPE_CLASS_TEXT or
+                (if (shown) InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD else InputType.TYPE_TEXT_VARIATION_PASSWORD)
+            secretField.typeface = Typeface.MONOSPACE
+            secretField.setSelection(Math.max(0, Math.min(sel, secretField.text.length)))
+            eye.text = if (shown) "Hide" else "Show"
+            eye.contentDescription = if (shown) "Hide the secret" else "Show the secret"
+        }
+        eye.contentDescription = "Show the secret"
+        secretRow.addView(eye, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(48)).apply { leftMargin = dp(8) })
+        pair.addView(secretRow)
+        buttons(pair, button("Scan QR code", false) { scanQr() }, button("Show my QR code", false) { showQr() }, top = 10)
+        buttons(pair, button("Paste", false) { paste() }, button("Copy pairing link", false) { copyPairLink() }, top = 8)
+        startBtn = button("Start", true) { saveDevice() }
+        pair.addView(startBtn, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(52)).apply { topMargin = dp(14) })
+
+        val peers = card("Your devices", "Every device paired with the same secret appears here once it is heard, as many as you have. " +
+            "The order is the priority: when two devices start playing together, the higher one gets the earbuds. Tap a device to change its type, clips or place.")
         peersBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         peers.addView(peersBox)
-
-        val statusCard = card("Status", "Whether each link really works right now, and when each device was last heard. Copy diagnostics asks every device for its status and the end of its log and shares one file. Logs never contain clipboard contents.")
-        statusBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        statusCard.addView(statusBox)
-        diagText = text("", 12.5f, subC).apply { setPadding(0, dp(8), 0, 0); visibility = View.GONE }
-        statusCard.addView(button("Copy diagnostics", false) { collectDiagnostics() }, lp(12))
-        statusCard.addView(diagText)
 
         val conn = card("Earbud switching link", "How this device tells your other devices where the earbuds are. Both is the most reliable.")
         segmented(conn, listOf("ble" to "Bluetooth", "both" to "Both", "wifi" to "Wi-Fi"), { prefs.getString("transport", "both") ?: "both" }) { v ->
@@ -959,19 +998,109 @@ class MainActivity : Activity() {
         linkText = text("", 13f, subC).apply { setPadding(dp(2), dp(8), 0, 0) }
         conn.addView(linkText)
 
-        val setup = card("This device", "Each device needs its own name, for example phone, tab or phone2 (lower case letters, digits and -, up to 20). The secret comes from the Mac (Settings, Network).")
-        val pairedSecret = intent?.data?.takeIf { it.scheme == "earhop" }?.getQueryParameter("secret")
-        // Tablets default to "tab" so a phone and a tablet never share the default name.
-        val defaultName = if (resources.configuration.smallestScreenWidthDp >= 600) "tab" else "phone"
-        nameField = field(setup, "Name", prefs.getString("name", defaultName) ?: defaultName)
-        buttons(setup, button("phone", false) { nameField.setText("phone") }, button("tab", false) { nameField.setText("tab") }, top = 8)
-        secretField = field(setup, "Shared secret", pairedSecret ?: prefs.getString("secret", "") ?: "", true)
-        buttons(setup, button("Scan QR code", false) { scanQr() }, button("Paste", false) { paste() }, top = 8)
-        startBtn = button("Start", true) { saveDevice() }
-        setup.addView(startBtn, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(52)).apply { topMargin = dp(14) })
+        val statusCard = card("Status", "Whether each link really works right now, and when each device was last heard. Copy diagnostics asks every device for its status and the end of its log and shares one file. Logs never contain clipboard contents.")
+        statusBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        statusCard.addView(statusBox)
+        diagText = text("", 12.5f, subC).apply { setPadding(0, dp(8), 0, 0); visibility = View.GONE }
+        statusCard.addView(button("Copy diagnostics", false) { collectDiagnostics() }, lp(12))
+        statusCard.addView(diagText)
 
         val tiles = card("Quick settings and widget", "Take, Release, Auto switching, Send clipboard and Noise control tiles, and the EarHop home screen widget.")
         buttons(tiles, button("Add tiles", false) { addTiles() }, button("Add widget", false) { addWidget() }, top = 0)
+    }
+
+    /** This device's pairing link: the same format as the Mac's QR code. */
+    private fun pairLink(): String? {
+        val s = prefs.getString("secret", "")?.takeIf { it.isNotBlank() } ?: secretField.text.toString().trim().takeIf { it.isNotEmpty() } ?: return null
+        return "earhop://pair?secret=${Uri.encode(s)}&port=47474"
+    }
+
+    private fun copyPairLink() {
+        val link = pairLink() ?: run { Toast.makeText(this, "Pair this device first: scan or paste the secret.", Toast.LENGTH_LONG).show(); return }
+        copy("EarHop pairing link", link)
+        Toast.makeText(this, "Pairing link copied. Paste it into Settings on the new device. Keep it private.", Toast.LENGTH_LONG).show()
+    }
+
+    /** Shows this device's pairing QR code, for a new phone, tablet, PC or the Mac's Scan With Camera. */
+    private fun showQr() {
+        val link = pairLink() ?: run { Toast.makeText(this, "Pair this device first: scan or paste the secret.", Toast.LENGTH_LONG).show(); return }
+        val size = dp(232)
+        val bmp = try {
+            com.journeyapps.barcodescanner.BarcodeEncoder().encodeBitmap(link, com.google.zxing.BarcodeFormat.QR_CODE, size, size)
+        } catch (e: Exception) { Toast.makeText(this, "Could not draw the code: ${e.message}", Toast.LENGTH_LONG).show(); return }
+        sheet("Pair a new device", "Scan with EarHop on the new device (Devices, Scan QR code) or with the Mac (Settings, Pairing, Scan With Camera).") { body, close ->
+            val tile = FrameLayout(this).apply {
+                background = round(0xFFFFFFFF.toInt(), 26)
+                setPadding(dp(16), dp(16), dp(16), dp(16))
+                contentDescription = "Pairing QR code"
+            }
+            tile.addView(ImageView(this).apply { setImageBitmap(bmp) }, FrameLayout.LayoutParams(size, size))
+            body.addView(tile, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                gravity = Gravity.CENTER_HORIZONTAL; topMargin = dp(6)
+            })
+            body.addView(status("Treat this code like a password: it holds your secret.", orange, 12.5f).apply {
+                gravity = Gravity.CENTER; setPadding(0, dp(14), 0, 0)
+            }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { gravity = Gravity.CENTER_HORIZONTAL })
+            buttons(body, button("Copy link", false) { copyPairLink() }, button("Done", true) { close() }, top = 18)
+        }?.window?.let { w -> w.attributes = w.attributes.apply { screenBrightness = 1f } }
+    }
+
+    /**
+     * A panel in the app's own look (the graphite card, rounded, over the blurred page) instead of the system's light
+     * dialog: a title, an optional note and whatever [build] adds. Rises from the bottom on phones, centred on tablets.
+     */
+    private fun sheet(title: String, note: String? = null, build: (LinearLayout, () -> Unit) -> Unit): android.app.Dialog? {
+        val d = android.app.Dialog(this)
+        d.requestWindowFeature(android.view.Window.FEATURE_NO_TITLE)
+        val panel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = g.surface(30, strong = true)
+            setPadding(dp(22), dp(20), dp(22), dp(20))
+        }
+        panel.addView(text(title, 20f, textC).apply { typeface = medium })
+        if (note != null) panel.addView(text(note, 13.5f, subC).apply { setPadding(0, dp(6), 0, dp(4)) })
+        val body = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(0, dp(10), 0, 0) }
+        panel.addView(body)
+        build(body) { d.dismiss() }
+        val scroll = ScrollView(this).apply { isVerticalScrollBarEnabled = false; addView(panel) }
+        d.setContentView(scroll)
+        val tablet = resources.configuration.smallestScreenWidthDp >= 600
+        d.window?.let { w ->
+            w.setBackgroundDrawable(android.graphics.drawable.ColorDrawable(android.graphics.Color.TRANSPARENT))
+            val width = Math.min(resources.displayMetrics.widthPixels - dp(24), dp(440))
+            w.setLayout(width, ViewGroup.LayoutParams.WRAP_CONTENT)
+            w.setGravity(if (tablet) Gravity.CENTER else Gravity.BOTTOM)
+            w.attributes = w.attributes.apply { y = if (tablet) 0 else dp(16); dimAmount = 0.45f }
+            w.addFlags(android.view.WindowManager.LayoutParams.FLAG_DIM_BEHIND)
+        }
+        blurBehind(d)
+        d.show()
+        return d
+    }
+
+    /** A tappable row in a panel: icon (optional), title, detail and a mark on the right. */
+    private fun sheetRow(parent: LinearLayout, icon: Int?, title: String, detail: String?, mark: String?, selected: Boolean = false, click: () -> Unit) {
+        val r = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(14), dp(12), dp(14), dp(12))
+            // The chosen row: filled and outlined in green (state on the outline), the others plain.
+            background = GradientDrawable().apply {
+                cornerRadius = dp(18).toFloat()
+                setColor(if (selected) chipC else android.graphics.Color.TRANSPARENT)
+                if (selected) setStroke(dp(2), green)
+            }
+            isClickable = true
+            setOnClickListener { tap(this); click() }
+            contentDescription = title + (if (detail != null) ", $detail" else "") + (if (selected) ", selected" else "")
+        }
+        if (icon != null) r.addView(ImageView(this).apply { setImageResource(icon); setColorFilter(textC) },
+            LinearLayout.LayoutParams(dp(22), dp(22)).apply { rightMargin = dp(14) })
+        val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        col.addView(text(title, 16f, textC))
+        if (detail != null) col.addView(text(detail, 12.5f, subC).apply { setPadding(0, dp(2), 0, 0) })
+        r.addView(col, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        if (mark != null) r.addView(text(mark, 18f, if (selected) textC else subC))
+        parent.addView(r, lp(4))
     }
 
     private fun buildSettingsPage() {
@@ -1147,7 +1276,7 @@ class MainActivity : Activity() {
         c.addView(safeBtn, lp(14))
     }
 
-    private fun pretty(n: String) = when (n) { "mac" -> "Mac"; "phone" -> "Phone"; "tab" -> "Tablet"; else -> n.replaceFirstChar { it.uppercase() } }
+    private fun pretty(n: String) = DeviceBook.pretty(n)
 
     private fun refreshDashboard(run: Boolean) {
         val now = System.currentTimeMillis()
@@ -1282,7 +1411,7 @@ class MainActivity : Activity() {
         }
         EhState.rejected.entries.firstOrNull()?.let { bad ->
             list += if (bad.value == "clock") Issue("${pretty(bad.key)} is ignored: its clock differs by more than 30 seconds. Set both to automatic time.", orange, null, null)
-            else Issue("${pretty(bad.key)} uses a different secret, so it is ignored. Scan the Mac's QR code again.", orange, "Scan QR code") { scanQr() }
+            else Issue("${pretty(bad.key)} uses a different secret, so it is ignored. Scan a pairing QR code again.", orange, "Scan QR code") { scanQr() }
         }
         val clipOn = prefs.getBoolean("clipSync", true) && prefs.getBoolean("clipAutoRoot", true) && !ClipSync.paused(this)
         if (run && clipOn) when (ClipSync.autoMethod(this)) {
@@ -1334,55 +1463,174 @@ class MainActivity : Activity() {
     }
 
     private fun refreshStrip(run: Boolean) {
-        // The devices seen recently, else mac, phone and tab, without this one.
+        // This device first, then every other device heard in the last 10 minutes (or mac, phone and tab before any).
         val self = prefs.getString("name", "phone") ?: "phone"
-        val seen = EhState.peers.keys.sorted()
-        val names = (listOf("mac", "phone", "tab") + seen).distinct().filter { it == self || it in seen || it in listOf("mac", "phone", "tab") }.take(4)
+        val now = System.currentTimeMillis()
+        val heard = DeviceBook.all(this).filter { n -> EhState.peers[n]?.let { now - it.seenAt < 600_000 } == true }
+        val names = listOf(self) + heard.ifEmpty { listOf("mac", "phone", "tab").filter { it != self } }
         val states = names.map { deviceState(it, run) }
-        val sig = states.joinToString { it.first }
+        val sig = names.joinToString() + states.joinToString { it.first }
         if (sig == stripSig) return
         stripSig = sig
         stripBox.removeAllViews()
+        val share = names.size <= 3
         names.forEachIndexed { i, n ->
-            val (s, color) = states[i]
+            val (st, color) = states[i]
             val cell = SpringCard(this, dp(16).toFloat(), 0.94f).apply {
                 orientation = LinearLayout.VERTICAL
                 background = round(chipC, 16)
                 setPadding(dp(12), dp(10), dp(10), dp(10))
-                setOnClickListener { tap(this); showPage("Devices") }
-                contentDescription = "${pretty(n)}: $s"
+                setOnClickListener { tap(this); if (n == self) showPage("Devices") else showDevice(n) }
+                contentDescription = "${pretty(n)}: $st"
             }
-            cell.addView(text(pretty(n), 15f, textC, true))
-            cell.addView(status(s, color, 12.5f).apply { setPadding(0, dp(3), 0, 0); maxLines = 1 })
-            stripBox.addView(cell, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { if (i > 0) leftMargin = dp(8) })
+            val head = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+            head.addView(ImageView(this).apply {
+                setImageResource(if (n == self) DeviceBook.selfKind(this@MainActivity).icon else DeviceBook.kind(this@MainActivity, n).icon)
+                setColorFilter(textC)
+            }, LinearLayout.LayoutParams(dp(18), dp(18)).apply { rightMargin = dp(6) })
+            head.addView(text(pretty(n), 15f, textC, true).apply { maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END })
+            cell.addView(head)
+            cell.addView(status(st, color, 12.5f).apply { setPadding(0, dp(4), 0, 0); maxLines = 1 })
+            val lpCell = if (share) LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                         else LinearLayout.LayoutParams(dp(128), ViewGroup.LayoutParams.WRAP_CONTENT)
+            stripBox.addView(cell, lpCell.apply { if (i > 0) leftMargin = dp(8) })
         }
     }
 
+    /** Every other device known here, as many as there are, in priority order. Tap one for its details. */
     private fun refreshPeers(run: Boolean) {
         val now = System.currentTimeMillis()
-        val live = EhState.peers.values.filter { now - it.seenAt < 15000 }.sortedBy { it.name }
-        val rows = live.map { p ->
-            val state = buildString {
-                if (p.call) append("on a call, ")
-                if (p.owner) append("has the earbuds, ")
-                append(if (p.playing) "playing" else "idle")
-                append(if (p.via == "ble") " over Bluetooth" else " over Wi-Fi")
-            }
-            Triple(p.name, state, p.owner)
+        val names = DeviceBook.all(this)
+        val rows = names.map { n ->
+            val p = EhState.peers[n]?.takeIf { now - it.seenAt < 15000 }
+            val kind = DeviceBook.kind(this, n).title
+            val what = when {
+                p == null -> EhState.peers[n]?.let { "last heard ${ago(now - it.seenAt)}" } ?: "not heard yet"
+                p.call -> "on a call"
+                p.owner -> "has the earbuds"
+                p.playing -> "playing"
+                else -> "online"
+            } + (if (p != null) (if (p.via == "ble") " over Bluetooth" else " over Wi-Fi") else "") +
+                (if (n in ClipSync.excluded(this)) ", no clips" else "")
+            Triple(n, "$kind · $what", p != null)
         }
         val sig = "$run" + rows.joinToString()
         if (sig == peersSig) return
         peersSig = sig
         peersBox.removeAllViews()
-        if (rows.isEmpty()) {
-            peersBox.addView(status(if (run) "No other devices seen yet. Open EarHop on the Mac with the same secret." else "Start EarHop to look for your other devices.", subC))
-        }
-        rows.forEachIndexed { idx, (name, state, owner) ->
+        if (rows.isEmpty()) peersBox.addView(status("No other device yet. Pair one with the QR code above.", subC))
+        rows.forEachIndexed { idx, (name, line, live) ->
             if (idx > 0) divider(peersBox)
-            val r = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(0, dp(2), 0, dp(2)) }
-            r.addView(text(pretty(name), 16f, textC, true))
-            r.addView(status(state.replaceFirstChar { it.uppercase() }, green, 13f).apply { setPadding(0, dp(3), 0, 0) })
+            val r = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(0, dp(6), 0, dp(6))
+                isClickable = true
+                setOnClickListener { tap(this); showDevice(name) }
+                contentDescription = "${pretty(name)}, $line. Opens its settings."
+            }
+            r.addView(ImageView(this).apply {
+                setImageResource(DeviceBook.kind(this@MainActivity, name).icon)
+                setColorFilter(if (live) textC else subC)
+                // State on the outline: green ring while the device is heard, none when it is away.
+                background = GradientDrawable().apply {
+                    shape = GradientDrawable.OVAL; setColor(chipC)
+                    if (live) setStroke(dp(2), green)
+                }
+                setPadding(dp(9), dp(9), dp(9), dp(9))
+            }, LinearLayout.LayoutParams(dp(42), dp(42)).apply { rightMargin = dp(12) })
+            val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+            col.addView(text(pretty(name), 16f, textC, true))
+            col.addView(text(line, 13f, subC).apply { setPadding(0, dp(2), 0, 0) })
+            r.addView(col, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            r.addView(text("›", 22f, subC))
             peersBox.addView(r)
+        }
+    }
+
+    private fun ago(ms: Long): String {
+        val s = ms / 1000
+        return when { s < 60 -> "$s s ago"; s < 3600 -> "${s / 60} min ago"; s < 86400 -> "${s / 3600} h ago"; else -> "${s / 86400} days ago" }
+    }
+
+    /** One device: its type, clips and files, priority and Forget, in an app-style panel. */
+    private fun showDevice(name: String) {
+        val now = System.currentTimeMillis()
+        val p = EhState.peers[name]
+        val live = p != null && now - p.seenAt < 15000
+        val kind = DeviceBook.kind(this, name)
+        val state = when {
+            p == null -> "not heard yet"
+            !live -> "last heard ${ago(now - p.seenAt)}"
+            p.call -> "on a call"
+            p.owner -> "has the earbuds"
+            p.playing -> "playing"
+            else -> "online over ${if (p.via == "ble") "Bluetooth" else "Wi-Fi"}"
+        }
+        sheet(pretty(name)) { body, close ->
+            // Who it is: the icon (green ring while heard), its kind and its state.
+            val head = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+            head.addView(ImageView(this).apply {
+                setImageResource(kind.icon); setColorFilter(textC)
+                background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(chipC); if (live) setStroke(dp(2), green) }
+                setPadding(dp(13), dp(13), dp(13), dp(13))
+            }, LinearLayout.LayoutParams(dp(54), dp(54)).apply { rightMargin = dp(14) })
+            val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+            col.addView(text(kind.title, 16f, textC))
+            col.addView(text(state.replaceFirstChar { it.uppercase() }, 13f, subC).apply { setPadding(0, dp(2), 0, 0) })
+            head.addView(col)
+            body.addView(head)
+
+            body.addView(text("Type", 13f, subC).apply { setPadding(dp(2), dp(18), 0, 0) })
+            val auto = DeviceBook.override(this, name) == null
+            sheetRow(body, kind.icon, kind.title, if (auto) "Automatic" else "Chosen by you", "›") { close(); pickKind(name) }
+
+            divider(body)
+            switchRow(body, "Send clipboard and files", "Copies and files from this device go to ${pretty(name)}",
+                { name !in ClipSync.excluded(this) }, track = false) { on ->
+                val ex = ClipSync.excluded(this).toMutableSet()
+                if (on) ex.remove(name) else ex.add(name)
+                prefs.edit().putStringSet("clipExclude", ex).apply()
+                peersSig = ""
+            }
+            divider(body)
+
+            val order = RuleStore.priority(this).toMutableList().also { if (name !in it) it.add(name) }
+            val pos = order.indexOf(name)
+            body.addView(text("Priority: when two devices start playing together, the higher one gets the earbuds.", 12.5f, subC)
+                .apply { setPadding(dp(2), dp(10), 0, 0) })
+            val up = button("Move up", false) {
+                java.util.Collections.swap(order, pos, pos - 1); RuleStore.setPriority(this, order); peersSig = ""; stripSig = ""; close()
+            }.apply { isEnabled = pos > 0; alpha = if (pos > 0) 1f else 0.4f }
+            val down = button("Move down", false) {
+                java.util.Collections.swap(order, pos, pos + 1); RuleStore.setPriority(this, order); peersSig = ""; stripSig = ""; close()
+            }.apply { isEnabled = pos < order.size - 1; alpha = if (pos < order.size - 1) 1f else 0.4f }
+            buttons(body, up, down, top = 10)
+
+            val bottom = mutableListOf<Button>()
+            if (name !in setOf("mac", "phone", "tab")) bottom += button("Forget", false) {
+                DeviceBook.forget(this, name); peersSig = ""; stripSig = ""; close()
+                Toast.makeText(this, "${pretty(name)} forgotten. It comes back if it is heard again.", Toast.LENGTH_LONG).show()
+            }.apply { setTextColor(red) }
+            bottom += button("Done", true) { close() }
+            buttons(body, *bottom.toTypedArray(), top = 18)
+        }
+    }
+
+    /** The type of a device: automatic (what it said, or a guess) or one picked here. */
+    private fun pickKind(name: String) {
+        val guess = DeviceBook.announced(this, name)
+        val chosen = DeviceBook.override(this, name)
+        sheet("Type of ${pretty(name)}", "Sets its icon and name on this device only.") { body, close ->
+            sheetRow(body, (guess ?: DeviceKind.guess(name)).icon, "Automatic",
+                if (guess != null) "${guess.title}, as it says" else "${DeviceKind.guess(name).title}, guessed from its name",
+                if (chosen == null) "✓" else null, selected = chosen == null) {
+                DeviceBook.setOverride(this, name, null); peersSig = ""; stripSig = ""; close(); showDevice(name)
+            }
+            for (k in DeviceKind.values()) {
+                sheetRow(body, k.icon, k.title, null, if (chosen == k) "✓" else null, selected = chosen == k) {
+                    DeviceBook.setOverride(this, name, k); peersSig = ""; stripSig = ""; close(); showDevice(name)
+                }
+            }
+            buttons(body, button("Cancel", false) { close(); showDevice(name) }, top = 14)
         }
     }
 
@@ -1831,7 +2079,7 @@ class MainActivity : Activity() {
             onboardCard.addView(text(body, 13f, subC))
             if (!done && action != null && act != null) onboardCard.addView(button(action, true) { act() }, lp(6))
         }
-        step(1, hasSecret, "Pair with your Mac", "On the Mac open Settings, Network, and scan the QR code. Or paste the secret.", "Scan QR code") { scanQr(); onboardSig = "" }
+        step(1, hasSecret, "Pair with your Mac", "On the Mac open Settings, Pairing, and scan the QR code. Or paste the secret.", "Scan QR code") { scanQr(); onboardSig = "" }
         step(2, perms, "Allow permissions", "EarHop needs Nearby devices and Location to find your earbuds.", "Allow") {
             checks().firstOrNull { !it.ok }?.fix?.invoke()
         }
@@ -1854,22 +2102,8 @@ class MainActivity : Activity() {
     private fun rebuildRules() {
         val box = rulesBox
         box.removeAllViews()
-        box.addView(text("Device priority. If two devices start playing together, the higher one wins.", 13f, subC))
-        val order = RuleStore.priority(this)
-        order.forEachIndexed { i, name ->
-            val r = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-            r.addView(text("${i + 1}.  ${pretty(name)}", 16f, textC), LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-            val up = button("↑", false) {
-                val l = order.toMutableList(); java.util.Collections.swap(l, i, i - 1); RuleStore.setPriority(this, l); rebuildRules()
-            }.apply { isEnabled = i > 0; alpha = if (i > 0) 1f else 0.4f; contentDescription = "Move $name up" }
-            val down = button("↓", false) {
-                val l = order.toMutableList(); java.util.Collections.swap(l, i, i + 1); RuleStore.setPriority(this, l); rebuildRules()
-            }.apply { isEnabled = i < order.size - 1; alpha = if (i < order.size - 1) 1f else 0.4f; contentDescription = "Move $name down" }
-            for (bt in listOf(up, down)) { bt.minWidth = 0; bt.minimumWidth = 0; bt.minHeight = 0; bt.minimumHeight = 0; bt.setPadding(0, 0, 0, 0) }
-            r.addView(up, LinearLayout.LayoutParams(dp(40), dp(36)))
-            r.addView(down, LinearLayout.LayoutParams(dp(40), dp(36)).apply { leftMargin = dp(6) })
-            box.addView(r, lp(6))
-        }
+        box.addView(text("Device priority: if two devices start playing together, the higher one wins. Set the order on the Devices page (tap a device).", 13f, subC))
+        box.addView(button("Open Devices", false) { showPage("Devices") }, lp(8))
 
         flag(box, "Quiet hours (no automatic switching)", "quietOn") { rebuildRules() }
         if (prefs.getBoolean("quietOn", false)) {
@@ -2113,7 +2347,7 @@ class MainActivity : Activity() {
         try {
             com.google.zxing.integration.android.IntentIntegrator(this)
                 .setDesiredBarcodeFormats(com.google.zxing.integration.android.IntentIntegrator.QR_CODE)
-                .setPrompt("Scan the QR code on the Mac: Settings, Network")
+                .setPrompt("Scan an EarHop pairing code: on the Mac in Settings, Pairing, or Show my QR code on another device")
                 .setBeepEnabled(false)
                 .setOrientationLocked(false)
                 .initiateScan()
@@ -2143,7 +2377,7 @@ class MainActivity : Activity() {
         secretField.setText(secret)
         val changed = secret != prefs.getString("secret", "")
         if (changed) {
-            Toast.makeText(this, "Paired with the Mac. Saving...", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "Paired. Saving...", Toast.LENGTH_SHORT).show()
             showPage("Devices")
             saveDevice()
         }

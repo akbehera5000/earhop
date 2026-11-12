@@ -16,6 +16,7 @@ There is no cloud, no account and no server.
 | Mac (macOS 13 or later, Apple silicon) | `mac/`, Swift menu bar app | `mac` |
 | Android phone | `android/`, Kotlin app with a foreground service | `phone` |
 | Android tablet (rooted) | the same APK | `tab` |
+| Windows PC (10 2004 or later, 11) | `windows/`, C# .NET 8 tray app (since 2026-11-12, untested on real hardware) | `pc` |
 
 Earbuds: AirPods Pro 2 and Samsung Galaxy Buds2 Pro. One pair is active at a time (the "profile").
 
@@ -80,8 +81,8 @@ file `files/earhop.log` (rotated at 1 MB).
 ```
 
 The single most important design rule: **all switching decisions live in `HandoffCore`**. Platform code only gathers
-facts and executes actions. Never add a decision rule to the platform code; add it to both cores and to both
-simulators.
+facts and executes actions. Never add a decision rule to the platform code; add it to all three cores (Swift, Kotlin,
+C# in `windows/EarHop.Core/HandoffCore.cs`) and to all three simulators.
 
 ## 4. Mac app (`mac/Sources/EarHop`)
 
@@ -102,8 +103,10 @@ simulators.
 | `AudioMonitor.swift` | Playing detection (CoreAudio device running plus per process output list on macOS 14.2+), microphone use, Play/Pause key, `MediaControl` (explicit Pause and Play through MediaRemote; never presses the toggle key on its own), `CallDetector`. |
 | `Config.swift` | `Config` (Codable with a tolerant decoder: every field optional when reading), `Log` (file log with rotation, `tail`, Copy log). |
 | `AppState.swift` | ObservableObject shared by the UI and the tick. Accent colours. |
-| `PopoverView.swift` | Menu bar popover: main status card, switching stages, hold and failure notes, battery chips, Take and Release, devices, recent events, diagnostics. `DeviceName` helpers. |
-| `SettingsView.swift` | Settings window pages: General, AirPods, Buds, Handoff, Apps, History, Network, Log. |
+| `PopoverView.swift` | Menu bar popover: earbuds switcher in the header, picture, switching stages, hold and failure notes, Take and Release, last switch with Undo, switching and clipboard tiles, a wrapping grid of every device, footer (Settings, Copy Log, Quit). |
+| `Devices.swift` | `DeviceKind` (mac, phone, tablet, iphone, ipad, windows, linux, other: title, SF Symbol, guess from the name), `DeviceName` (pretty names, kind and icon from announced, hand-picked or guessed kinds), `Hello` (the "hello" control message). |
+| `QRScanner.swift` | Scan With Camera on the Pairing page: AVCaptureSession plus a Core Image QR detector, mirrored preview, nothing saved. |
+| `SettingsView.swift` | Settings window: General, Devices (every device, priority, per device sheet), Earbuds (one page for both pairs and the Buds controls), Switching (rules, calls, attention, volume, quiet hours, Wi-Fi list, apps, timing, Live), Clipboard (`ClipView.swift`), Pairing (name, secret, QR, Scan With Camera), Connection (link mode, link checks, port), History, Log (with Copy Diagnostics). Each setting is on one page only. |
 | `Clipboard.swift` | Clipboard sync: `ClipCodec` (AES-256-GCM frame), `ClipChunks` (Bluetooth chunks), `ClipTcp` (Wi-Fi, port 47475), `ClipBle` (GATT service and client), `ClipSync` (watch, send, apply). |
 | `ConnectionView.swift` | `LinkMode` and `ConnectionControl`: the Bluetooth / Both / Wi-Fi switch with live link dots, used in the popover and on the Settings Connection page. |
 | `Glass.swift` | Liquid Glass helpers (`glassCard`, `glassCapsule`, `glassButton`, `GlassGroup`) with fallbacks before macOS 26. |
@@ -139,6 +142,7 @@ Mac specifics worth knowing:
 | `EarScanner.kt` | AirPods beacon scan, per source smoothed signal strength, readings with confidence. |
 | `AacpClient.kt` | Experimental AirPods direct channel. Refused without root on the phone; gives up quietly. |
 | `BudsProtocol.kt`, `BudsClient.kt` | Galaxy Buds channel (RFCOMM UUID `2e73a4ad-332d-41fc-90e2-16bef06523f2`), same rules as the Mac. |
+| `Devices.kt` | `DeviceKind` (same ids as the Mac), `DeviceBook` (every known device, announced and chosen kinds, Forget, names), `Hello` (the "hello" control message). |
 | `Rules.kt` | `RuleStore` (priority, quiet hours, Wi-Fi list, Do Not Disturb, volume profile; the gate is cached 0.5 s), `AppRules` (ignored and preferred apps through notification access). |
 | `AutoGate.kt` | Pure gate logic (unit tested). |
 | `Earbuds.kt` | Active profile (AirPods or Buds) and the Bluetooth name filter. |
@@ -161,6 +165,22 @@ Android specifics worth knowing:
 * Default device name is `tab` on tablets (smallest width 600 dp or more), `phone` otherwise.
 * The hidden connect works on the phone. It may be blocked on the tablet (that is what the root fallback is for).
 * Battery restrictions on some phones kill the service unless battery is set to "No restrictions".
+
+## 5b. Windows app (`windows/`)
+
+| Project | Role |
+| --- | --- |
+| `EarHop.Core` (net8.0, any OS) | `HandoffCore.cs` (port of HandoffCore.swift), `Protocol.cs` (Status, Proto, BlePayload, ClockGuard, PeerOrder, NameBook, AddressBook), `Clip.cs` (ClipCodec, FileCrypt, Receipts, PasswordLike), `UdpLink.cs`, `ClipTcp.cs`, `Config.cs` (config and Log). |
+| `EarHop.Tests` (net8.0 console) | The self test: vectors, clip frames from the Mac and Android, all simulator timelines, loopback UDP, clip and file transfers on spare ports. Runs on the Mac, prints "selftest OK (n checks)". |
+| `EarHop` (net8.0-windows10.0.19041.0, WinForms) | `TrayApp.cs` (tray menu, 0.25 s loop, status sending, diagnostics), `Controller.cs`, `Audio.cs` (AudioMonitor through NAudio, MIT; `BtAudio` and `Ks`: KSPROPSETID_BtAudio one-shot connect and disconnect through the endpoint's device topology), `MediaControl.cs` (explicit Pause and Play through Windows media sessions), `Network.cs` (Bluetooth LE status listener), `ClipSync.cs`, `SendPicker.cs`, `SettingsForm.cs`, `Program.cs` (single instance, pipe for Send to, Run key). |
+
+Windows specifics: playing = an app audio session on the default output had a peak above 0.0008 in the last 2 s; call =
+a capture session active while playing, for 2 s; owner = an active render endpoint whose name contains the earbuds
+filter ("Buds2 Pro" or "AirPods"); no ear reading (`RequireEar` false, ear sent as "unknown"); status over Wi-Fi only,
+Bluetooth LE is received but not advertised, so other devices must have `transport` "both" to use the PC's status;
+clipboard over Wi-Fi only. Config `%APPDATA%\EarHop\config.json`, log `earhop.log` beside it. Build on the Mac with
+`bash windows/build.sh` (Microsoft's .NET 8 SDK in `~/.dotnet`; Homebrew's source build lacks the Windows targets).
+The Mac writes "text\/plain" in clip headers (escaped slash), the PC "text/plain": both are the same JSON.
 
 ## 6. Protocol (must stay identical in Swift, Kotlin and Python)
 
@@ -213,7 +233,7 @@ sent after the clip was put on the clipboard and again for every later copy of i
 (diagnostics, the reply is the status lines plus at most 50 KB of log); `link` (open a web link, receipt like a
 clip); `batt` (`L,R,case,chargingL,chargingR,chargingCase` from the device that reads the earbuds); `vol` (0 to 1,
 from the owner); `settings` (SettingsSync: `{"v":{key:value},"t":{key:stamp}}`, newest stamp wins after the clock
-offset). Files: "EHF1" streams on port 47475 (docs/PORTING.md). `Receipts` (pure, tested): retry the devices that
+offset). `hello` (`{"type":"mac|phone|tablet|iphone|ipad|windows|linux|other","app","version"}`: what the device is, for icons; sent at start, when a device joins and every 10 minutes; unknown kinds are ignored). Files: "EHF1" streams on port 47475 (docs/PORTING.md). `Receipts` (pure, tested): retry the devices that
 did not confirm after 5 and 15 s, "not delivered" after 60 s. The duplicate check is atomic (`firstTime`), as both links
 deliver the same id at the same moment. Receipts and diagnostics bypass the clipboard on/off and pause settings.
 
@@ -398,6 +418,11 @@ Tooling notes:
     takes it for the user leaving and goes into picture-in-picture.
 34. **BLUETOOTH_SCAN stays `neverForLocation`.** Without it a background-restarted service hears nobody when location
     is allowed only while in use.
+35. **ZXing Android Embedded needs androidx.core but does not pull it in.** Without `androidx.core:core` the scanner
+    crashed as it opened (NoClassDefFoundError ContextCompat). Keep the dependency; release builds hid the problem until
+    the camera screen ran.
+36. **Never cap the number of devices.** Lists (Home strip, Devices, priority) take any device name; mac, phone and tab
+    are only defaults. Per device choices (clipboard, kind, priority) live on the Devices page of each app.
 
 ## 10. Working rules from the owner
 
@@ -423,6 +448,6 @@ Tooling notes:
 * Galaxy Buds controls (noise, equalizer, touch lock, Find My Buds) are untested on the real Buds.
 * The Buds frame offsets were never compared against GalaxyBudsClient or captured frames.
 * The Mac app is signed with a local certificate, not a Developer ID, so it is not notarized.
-* Android is `1.4.0` (versionCode 15, release build); the Mac is `1.4.0`.
+* Android is `1.4.1` (versionCode 16, release build); the Mac and Windows are `1.4.1`.
 * Shizuku start on boot and the automatic helper restart are not yet confirmed after a real phone restart.
 * Language support is not implemented.

@@ -50,6 +50,13 @@
         android:label="EarHop"
         android:theme="@android:style/Theme.DeviceDefault.Light.NoActionBar">
 
+        <!-- The QR scanner (ZXing Android Embedded) is fixed to landscape by its own manifest; here it follows how the
+             device is held, so phones scan upright. -->
+        <activity
+            android:name="com.journeyapps.barcodescanner.CaptureActivity"
+            android:screenOrientation="fullUser"
+            tools:replace="android:screenOrientation" />
+
         <activity
             android:name=".MainActivity"
             android:exported="true">

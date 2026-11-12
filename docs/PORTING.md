@@ -42,7 +42,9 @@ earbuds, and send Pause and Play.
 * **Frame:** `"EHC1" | nonce (12) | AES-256-GCM(key, header length (2) | header JSON | data) | tag`, associated data
   `"EHC1"`, key `HMAC-SHA256(secret, "earhop clip v1")`. Header `{dev,id,kind,mime,[to],ts,v:1}`.
 * **Kinds:** `text`, `image`, `link` (content), `ack` (receipt, data = id), `diag-req`, `diag`, `batt`
-  (`L,R,case,chargingL,chargingR,chargingCase`), `vol` (0 to 1), `settings` (`{"v":{...},"t":{...}}`).
+  (`L,R,case,chargingL,chargingR,chargingCase`), `vol` (0 to 1), `settings` (`{"v":{...},"t":{...}}`),
+  `hello` (`{"type":"windows","app":"windows","version":"1.4.0"}`: what the device is, for its icon on the other
+  devices; send it at start, when a device joins and every 10 minutes).
 * **Wi-Fi:** TCP port 47475, one `length (4) | frame` per connection. Accept connections only from addresses learned
   from signed status packets.
 * **Bluetooth LE:** GATT service `EAC1B000-5EED-4C1E-8A00-000000000001`, inbox `...B001` (write, encrypted), name

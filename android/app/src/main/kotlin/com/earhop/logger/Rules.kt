@@ -17,8 +17,9 @@ object RuleStore {
     val devices = listOf("mac", "tab", "phone")
     private fun p(ctx: Context) = ctx.getSharedPreferences("earhop", Context.MODE_PRIVATE)
 
+    /** The priority order: any device names (as many as there are), then mac, tab and phone if missing. */
     fun priority(ctx: Context): List<String> {
-        val saved = (p(ctx).getString("priority", "") ?: "").split(",").map { it.trim() }.filter { it in devices }.distinct()
+        val saved = (p(ctx).getString("priority", "") ?: "").split(",").map { it.trim() }.filter { DeviceNames.valid(it) }.distinct()
         return saved + devices.filter { it !in saved }
     }
 

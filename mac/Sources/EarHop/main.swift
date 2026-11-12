@@ -59,6 +59,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         link.start()
         discovery.start()
         NameBook.shared.setup(secret: cfg.secret, known: cfg.knownDevices)
+        DeviceName.update(cfg)
         NameBook.shared.onChange = { [weak self] all in
             DispatchQueue.main.async {
                 guard let self else { return }
@@ -183,6 +184,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self = self else { return }
             self.controller.cfg = c
             self.clip.cfg = c
+            DeviceName.update(c)
             MediaControl.useKeyOnly = c.mediaControl == "key"
             self.updateIcon()
             self.applyAppearance(c)
@@ -334,6 +336,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if let v = Float(text) { remoteVolume = (item.dev, v, Date()) }
         case "settings":
             applySharedSettings(text, from: item.dev)
+        case "hello":
+            // Another device says what it is (phone, tablet, Windows PC, ...), for its icon and name everywhere.
+            guard let h = Hello.decode(item.data), DeviceNames.valid(item.dev) else { return }
+            NameBook.shared.add(item.dev)
+            if state.cfg.deviceKinds[item.dev] != h.kind.rawValue {
+                state.cfg.deviceKinds[item.dev] = h.kind.rawValue
+                Log.write("devices: \(item.dev) is a \(h.kind.title) (EarHop \(h.app) \(h.version))")
+            }
         default: break
         }
     }
@@ -463,6 +473,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var lastShared: [String: String] = [:]
     private var settingsCheckedAt = Date.distantPast
     private var settingsSentAt = Date.distantPast
+    private var helloSentAt = Date.distantPast
     private var settingsPeers = Set<String>()
 
     /// Once a second: a shared setting changed here is stamped and sent; every 5 minutes, and when a new device appears,
@@ -480,6 +491,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let peersNow = Set(state.peers.map(\.name))
         let newPeer = !peersNow.subtracting(settingsPeers).isEmpty
         settingsPeers = peersNow
+        // Tell the others what this device is: at start, when a device joins, and every 10 minutes.
+        if newPeer || Date().timeIntervalSince(helloSentAt) > 600 {
+            helloSentAt = Date()
+            let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.4.0"
+            clip.sendControl(kind: "hello", data: Hello.encode(kind: .mac, app: "mac", version: version), to: nil)
+        }
         if changed || newPeer || Date().timeIntervalSince(settingsSentAt) > 300 {
             settingsSentAt = Date()
             clip.sendControl(kind: "settings", data: SettingsSync.encode(state.cfg, stamps: state.cfg.settingsStamps), to: nil)
@@ -701,21 +718,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         updateIcon()
     }
 
+    /// What the menu bar button shows now; the button is only touched when this changes.
+    private var iconKey = ""
+
     func updateIcon() {
         let switching = state.stage != nil
         let name = switching ? "arrow.triangle.2.circlepath" : (state.cfg.isBuds ? "earbuds" : "airpodspro")
-        let desc = switching ? "EarHop, switching" : (state.owner ? "EarHop, connected here" : "EarHop")
-        let img = NSImage(systemSymbolName: name, accessibilityDescription: desc)
-        img?.isTemplate = true
-        item.button?.image = img
+        var desc = switching ? "EarHop, switching" : (state.owner ? "EarHop, connected here" : "EarHop")
+        if !state.cfg.liveMode { desc += ", dry run" }
         var title = state.safeMode ? " !" : (state.owner ? " \u{25CF}" : "")
         if state.cfg.menuBarBattery, let b = batteryLevels(), let m = [b.l, b.r].filter({ $0 >= 0 }).min() {
             // The lower bud, from this Mac or from the device that has the earbuds.
             title += " \(m)%"
         }
-        item.button?.title = title
-        item.button?.imagePosition = title.isEmpty ? .imageOnly : .imageLeading
-        item.button?.toolTip = state.cfg.liveMode ? "EarHop (live)" : "EarHop (dry run)"
+        // This runs four times a second. Setting the button (and above all its tooltip) again and again while macOS
+        // showed that tooltip left the "EarHop (live)" tooltip stuck to the pointer after the popover opened
+        // (2026-11-13). So: no tooltip at all, and the button is only changed when what it shows changes.
+        let key = "\(name)|\(title)|\(desc)"
+        guard key != iconKey, let button = item.button else { return }
+        iconKey = key
+        let img = NSImage(systemSymbolName: name, accessibilityDescription: desc)
+        img?.isTemplate = true
+        button.image = img
+        button.title = title
+        button.imagePosition = title.isEmpty ? .imageOnly : .imageLeading
+        button.toolTip = nil
+        button.setAccessibilityLabel(desc)
     }
 
     @objc func togglePopover() {
@@ -729,13 +757,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func showSettings() {
         popover.performClose(nil)
         if settingsWindow == nil {
-            let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 760, height: 520),
+            let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 860, height: 620),
                              styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
                              backing: .buffered, defer: false)
-            w.title = "EarHop Settings"
+            // Like System Settings: the sidebar runs under the title bar and the title names the page.
+            w.title = "General"
+            w.toolbar = NSToolbar(identifier: "earhop.settings")
+            w.toolbarStyle = .unified
             w.titlebarAppearsTransparent = true
             w.contentViewController = NSHostingController(rootView: SettingsView(state: state))
-            w.setContentSize(NSSize(width: 760, height: 520))
+            w.setContentSize(NSSize(width: 860, height: 620))
+            w.setFrameAutosaveName("EarHopSettings")
+            state.onSettingsPage = { [weak w] p in w?.title = p.rawValue }
             w.isReleasedWhenClosed = false
             w.center()
             settingsWindow = w
@@ -1058,6 +1091,13 @@ if CommandLine.arguments.contains("--selftest") {
     RunLoop.current.run(until: Date().addingTimeInterval(0.2))
     check("call peer makes owner release", yielded)
 
+    // Device kinds: the hello message round trip, guesses from names, and Apple's spelling of iPhone.
+    let hello = Hello.decode(Hello.encode(kind: .windows, app: "windows", version: "1.4.0"))
+    check("hello round trip", hello?.kind == .windows && hello?.app == "windows")
+    check("hello refuses junk", Hello.decode(Data("{\"type\":\"toaster\"}".utf8)) == nil && Hello.decode(Data("x".utf8)) == nil)
+    check("kind guesses", DeviceKind.guess("phone2") == .phone && DeviceKind.guess("tab") == .tablet && DeviceKind.guess("work-pc") == .windows
+          && DeviceKind.guess("iphone") == .iphone && DeviceKind.guess("mac-mini") == .mac && DeviceKind.guess("kitchen") == .other)
+    check("pretty names", DeviceName.pretty("iphone-2") == "iPhone-2" && DeviceName.pretty("tab") == "Tablet" && DeviceName.pretty("work-pc") == "Work-pc")
     runHandoffSimTests(check)
     // Fix 6: the same timelines with the real connect and disconnect times seen on the Buds (7 s and 1.5 s).
     HandoffSim.defaultConnect = 7; HandoffSim.defaultDisconnect = 1.5
@@ -1241,6 +1281,44 @@ if let i = CommandLine.arguments.firstIndex(of: "--snapshot"), i + 1 < CommandLi
             s.cfg.transport = "ble"; s.bleLive = false
             s.peers = [Controller.PeerInfo(name: "phone", playing: true, ear: .both, owner: true, call: false, age: 0, via: "wifi")]
         }
+    }
+    // Many devices of every kind: the popover grid and every Settings page.
+    func sample(_ s: AppState) {
+        s.cfg.earbuds = "buds"; s.owner = true; s.playing = true; s.phase = .ownerPlaying; s.budsStatus = "off"
+        s.cfg.knownDevices = ["work-pc", "iphone", "linux-box", "tab2"]
+        s.cfg.deviceKinds = ["work-pc": "windows", "iphone": "iphone", "linux-box": "linux", "tab2": "tablet", "phone": "phone", "tab": "tablet"]
+        s.cfg.priority = ["mac", "tab", "phone", "work-pc"]
+        DeviceName.update(s.cfg)
+        s.peers = [Controller.PeerInfo(name: "phone", playing: true, ear: .both, owner: false, call: false, age: 0, via: "ble"),
+                   Controller.PeerInfo(name: "tab", playing: false, ear: .unknown, owner: false, call: false, age: 1, via: "ble"),
+                   Controller.PeerInfo(name: "work-pc", playing: false, ear: .unknown, owner: false, call: false, age: 2, via: "wifi"),
+                   Controller.PeerInfo(name: "iphone", playing: false, ear: .unknown, owner: false, call: true, age: 0, via: "wifi")]
+        s.status.devices = ["phone", "tab", "work-pc", "iphone", "linux-box"].map {
+            LinkStatus.Device(name: $0, lastHeard: Date().addingTimeInterval($0 == "linux-box" ? -900 : -1), via: "ble", bleAt: Date(), wifiHosts: [], clockOffsetMs: 300)
+        }
+        s.history = ev
+    }
+    for dark in [false, true] { shot("many-devices-\(dark ? "dark" : "light")", dark: dark, sample) }
+    for page in SettingsPage.allCases {
+        var c = Config(secret: "0123456789abcdef0123456789abcdef"); c.liveMode = true; c.budsAddress = "aa-bb-cc-dd-ee-ff"
+        let st = AppState(cfg: c)
+        sample(st)
+        st.settingsPageRequest = page
+        let w = NSWindow(contentRect: NSRect(x: 60, y: 60, width: 860, height: 620),
+                         styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
+        w.title = page.rawValue
+        w.toolbar = NSToolbar(identifier: "snap")
+        w.toolbarStyle = .unified
+        w.titlebarAppearsTransparent = true
+        w.appearance = NSAppearance(named: .darkAqua)
+        w.contentViewController = NSHostingController(rootView: SettingsView(state: st))
+        w.setContentSize(NSSize(width: 860, height: 620))
+        w.orderFrontRegardless()
+        RunLoop.current.run(until: Date().addingTimeInterval(1.2))
+        if let img = CGWindowListCreateImage(.null, .optionIncludingWindow, CGWindowID(w.windowNumber), [.boundsIgnoreFraming, .bestResolution]) {
+            try? NSBitmapImageRep(cgImage: img).representation(using: .png, properties: [:])?.write(to: dir.appendingPathComponent("settings-\(page.rawValue.lowercased()).png"))
+        }
+        w.orderOut(nil)
     }
     exit(0)
 }
