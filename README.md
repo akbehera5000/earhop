@@ -1,39 +1,112 @@
-# EarHop: automatic earbud switching and universal clipboard for Mac, Windows and Android
+<div align="center">
 
-[![Latest release](https://img.shields.io/github/v/release/akbehera5000/earhop?label=download&color=9466FF)](https://github.com/akbehera5000/earhop/releases/latest)
-![Platforms](https://img.shields.io/badge/platforms-macOS%20%7C%20Windows%20%7C%20Android-4D9EFF)
-![No cloud](https://img.shields.io/badge/cloud-none-30D158)
+<img src="docs/media/hero.svg" alt="EarHop: AirPods Pro 2 and Galaxy Buds2 Pro switch automatically between Mac, Windows and Android" width="100%">
+
+# EarHop
+
+### Automatic earbud switching and a universal clipboard for Mac, Windows and Android
+
+Your **AirPods Pro 2** or **Galaxy Buds2 Pro** jump to whichever device starts playing.
+Copy on your phone, paste on your PC. Send a photo from your Mac to your Android in a tap.
+**Free, open source, no cloud, no account.**
+
+[![Download for Mac](https://img.shields.io/badge/Download-Mac-9466FF?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/akbehera5000/earhop/releases/latest/download/EarHop-Mac-1.4.1.dmg)
+[![Download for Windows](https://img.shields.io/badge/Download-Windows-4D9EFF?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/akbehera5000/earhop/releases/latest/download/EarHop-Windows-Setup-1.4.4.exe)
+[![Download for Android](https://img.shields.io/badge/Download-Android-30D158?style=for-the-badge&logo=android&logoColor=white)](https://github.com/akbehera5000/earhop/releases/latest/download/EarHop-Android-1.4.1.apk)
+
+[![Latest release](https://img.shields.io/github/v/release/akbehera5000/earhop?label=latest&color=9466FF)](https://github.com/akbehera5000/earhop/releases/latest)
+![Platforms](https://img.shields.io/badge/macOS%20%7C%20Windows%20%7C%20Android-supported-4D9EFF)
+![Earbuds](https://img.shields.io/badge/AirPods%20Pro%202%20%7C%20Galaxy%20Buds2%20Pro-supported-9466FF)
+![Privacy](https://img.shields.io/badge/cloud-none-30D158)
 [![Stars](https://img.shields.io/github/stars/akbehera5000/earhop?style=social)](https://github.com/akbehera5000/earhop/stargazers)
 
-**Your earbuds follow you.** Start a video on your laptop and your **AirPods Pro** or **Samsung Galaxy Buds2 Pro**
-move over by themselves while your phone pauses. Copy text on your phone and paste it on your PC. Apple's automatic
-switching and Universal Clipboard, for every device you own: **Mac, Windows PCs, Android phones and tablets.**
+<img src="docs/media/features.svg" alt="Earbuds that follow you, copy here and paste there, send files in a tap" width="100%">
 
-Free and open source. Everything stays on your own Wi-Fi and Bluetooth: **no cloud, no account, no tracking.**
+</div>
 
-**[⬇ Download the latest release](https://github.com/akbehera5000/earhop/releases/latest)**: Mac (.dmg), Windows
-(installer) and Android (.apk).
+## Why EarHop?
 
-### Features
+Apple's earbuds switch automatically only between Apple devices. Samsung's only between Samsung devices. Real life is
+mixed: a Mac at work, a Windows PC at home, an Android phone in your pocket. **EarHop makes your earbuds and your
+clipboard follow you across all of them.**
 
-* 🎧 **Automatic Bluetooth earbud switching** between Mac, Windows and Android: the device that starts playing gets
-  the earbuds, the one that lost them pauses (and never restarts on its speakers).
-* 📞 **Calls come first:** a phone call or a Zoom, Teams or WhatsApp meeting takes the earbuds at once.
-* 👂 **Ear detection:** take an earbud out and playback pauses, put it back and it resumes.
-* 📋 **Universal clipboard and file sharing** across Mac, Windows and Android: text, images, links and files over
-  Wi-Fi and Bluetooth LE, end-to-end encrypted (AES-256-GCM) with your own key.
-* 🔋 **Galaxy Buds battery and controls** on Mac and Windows: battery levels, noise cancelling, ambient sound,
-  equalizer, touch lock.
-* 🖥️ **Any number of devices**, each with its own name, paired with one QR code or link.
-
-| Device | App |
+| | What you get |
 | --- | --- |
-| Mac (macOS 13 or later, Liquid Glass on macOS 26 and later) | `mac/`, a menu bar app |
-| Windows 10 (2004 or later) and 11, 64 bit | `windows/`, a tray app with a Fluent design and an installer |
-| Android phones and tablets, Android 8 or later (root optional) | `android/`, an app with a foreground service |
+| 🎧 **Earbuds that follow you** | Start a video on your laptop and the earbuds move there; your phone pauses by itself. No more digging through Bluetooth menus. |
+| 📞 **Calls come first** | A phone call or a Zoom, Teams or WhatsApp meeting takes the earbuds at once. |
+| 👂 **Ear detection** | Take an earbud out and the music pauses. Put it back and it plays on. |
+| 📋 **Universal clipboard** | Copy text, links or images on one device, paste on another. Mac, Windows and Android. |
+| 📁 **File sharing** | Send photos and documents between Mac, Windows and Android over your own Wi-Fi. An AirDrop alternative that works everywhere. |
+| 🔋 **Battery and controls** | Galaxy Buds battery, noise cancelling, ambient sound and equalizer, right from your Mac or PC. |
+| 🔒 **Private** | Everything stays on your Wi-Fi and Bluetooth, encrypted with your own key. No cloud, no account, no tracking. |
 
-Works with AirPods Pro 2 and Galaxy Buds2 Pro today. A Linux app does not exist yet; `docs/PORTING.md` describes
-everything one needs to write one.
+## Supported earbuds and devices
+
+| Earbuds | Devices |
+| --- | --- |
+| ✅ **Apple AirPods Pro 2** | 🍎 Mac with macOS 13 or later |
+| ✅ **Samsung Galaxy Buds2 Pro** | 🪟 Windows 10 (2004 or later) or Windows 11, 64 bit |
+| | 🤖 Android 8 or later, phones and tablets |
+
+Use as many devices as you like, in any mix. Other earbuds and headphones are not supported yet; tell us which ones you
+would like in an [issue](https://github.com/akbehera5000/earhop/issues).
+
+## Get started in 3 steps
+
+1. **Install EarHop** on each device from the [latest release](https://github.com/akbehera5000/earhop/releases/latest)
+   and pair your earbuds with each device once in its Bluetooth settings.
+2. **Link your devices:** on the first one open Settings, Pairing; on the others scan its QR code or paste its link.
+3. **Play something.** Your earbuds come to you.
+
+<details>
+<summary><b>First launch notes</b> (the apps are not signed by Apple or Microsoft yet)</summary>
+
+* **Mac:** right click EarHop, Open, the first time.
+* **Windows:** SmartScreen asks once: More info, Run anyway. Allow EarHop on private networks when the firewall asks.
+* **Android:** allow installing from your browser or file manager when asked.
+</details>
+
+## FAQ
+
+<details><summary><b>Can my AirPods Pro 2 switch automatically between a Mac, a Windows PC and an Android phone?</b></summary>
+
+Yes. Apple only switches AirPods between Apple devices signed in to the same Apple ID. With EarHop on each device,
+your AirPods Pro 2 move to whichever Mac, Windows PC or Android phone starts playing.
+</details>
+
+<details><summary><b>Can Galaxy Buds2 Pro switch automatically with a Mac or a Windows PC?</b></summary>
+
+Yes. Samsung's auto switch only works between Samsung devices. EarHop switches your Galaxy Buds2 Pro between your
+Samsung or other Android phone, your tablet, your Mac and your Windows PC, and shows their battery and noise control.
+</details>
+
+<details><summary><b>How do I sync the clipboard between Android, Windows and Mac?</b></summary>
+
+Install EarHop on each device and turn on Clipboard. Anything you copy shows up on your other devices, over Wi-Fi or
+Bluetooth, encrypted with your own key.
+</details>
+
+<details><summary><b>Is there an AirDrop alternative between Windows, Android and Mac?</b></summary>
+
+EarHop sends files between all three over your own Wi-Fi: right click a file and choose Send to, or use Share on
+Android and the Mac.
+</details>
+
+<details><summary><b>Does EarHop upload my data anywhere?</b></summary>
+
+No. There is no server and no account. Devices talk to each other directly on your network and over Bluetooth, and
+everything they send is encrypted with a secret only your devices know.
+</details>
+
+<details><summary><b>Is EarHop free?</b></summary>
+
+Yes, free and open source. If it helps you, a ⭐ star helps other people find it.
+</details>
+
+---
+
+The rest of this page is for developers and curious minds: how switching works, building from source, and
+troubleshooting.
 
 ## How switching works
 
