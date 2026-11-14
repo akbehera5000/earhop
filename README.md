@@ -1,17 +1,39 @@
-# EarHop
+# EarHop: automatic earbud switching and universal clipboard for Mac, Windows and Android
 
-One pair of earbuds, several devices. EarHop moves your AirPods Pro 2 or Galaxy Buds2 Pro to whichever device
-starts playing, pauses the device that lost them, and pauses and resumes when you take an earbud out. It runs
-entirely on your local network: no cloud, no account.
+[![Latest release](https://img.shields.io/github/v/release/akbehera5000/earhop?label=download&color=9466FF)](https://github.com/akbehera5000/earhop/releases/latest)
+![Platforms](https://img.shields.io/badge/platforms-macOS%20%7C%20Windows%20%7C%20Android-4D9EFF)
+![No cloud](https://img.shields.io/badge/cloud-none-30D158)
+[![Stars](https://img.shields.io/github/stars/akbehera5000/earhop?style=social)](https://github.com/akbehera5000/earhop/stargazers)
+
+**Your earbuds follow you.** Start a video on your laptop and your **AirPods Pro** or **Samsung Galaxy Buds2 Pro**
+move over by themselves while your phone pauses. Copy text on your phone and paste it on your PC. Apple's automatic
+switching and Universal Clipboard, for every device you own: **Mac, Windows PCs, Android phones and tablets.**
+
+Free and open source. Everything stays on your own Wi-Fi and Bluetooth: **no cloud, no account, no tracking.**
+
+**[⬇ Download the latest release](https://github.com/akbehera5000/earhop/releases/latest)**: Mac (.dmg), Windows
+(installer) and Android (.apk).
+
+### Features
+
+* 🎧 **Automatic Bluetooth earbud switching** between Mac, Windows and Android: the device that starts playing gets
+  the earbuds, the one that lost them pauses (and never restarts on its speakers).
+* 📞 **Calls come first:** a phone call or a Zoom, Teams or WhatsApp meeting takes the earbuds at once.
+* 👂 **Ear detection:** take an earbud out and playback pauses, put it back and it resumes.
+* 📋 **Universal clipboard and file sharing** across Mac, Windows and Android: text, images, links and files over
+  Wi-Fi and Bluetooth LE, end-to-end encrypted (AES-256-GCM) with your own key.
+* 🔋 **Galaxy Buds battery and controls** on Mac and Windows: battery levels, noise cancelling, ambient sound,
+  equalizer, touch lock.
+* 🖥️ **Any number of devices**, each with its own name, paired with one QR code or link.
 
 | Device | App |
 | --- | --- |
 | Mac (macOS 13 or later, Liquid Glass on macOS 26 and later) | `mac/`, a menu bar app |
-| Android phones and tablets (root optional) | `android/`, an app with a foreground service |
-| Windows 10 (2004 or later) and 11, 64 bit | `windows/`, a tray app (new, not yet tried on a real PC) |
+| Windows 10 (2004 or later) and 11, 64 bit | `windows/`, a tray app with a Fluent design and an installer |
+| Android phones and tablets, Android 8 or later (root optional) | `android/`, an app with a foreground service |
 
-Any number of devices can join, each with its own name. A Linux app does not exist yet; `docs/PORTING.md` describes
-everything one needs.
+Works with AirPods Pro 2 and Galaxy Buds2 Pro today. A Linux app does not exist yet; `docs/PORTING.md` describes
+everything one needs to write one.
 
 ## How switching works
 
@@ -86,26 +108,29 @@ All tests at once: `bash tests/run.sh`.
 
 ## Windows
 
-`dist/EarHop-Windows-1.4.1.exe` is one file; it needs no install and no .NET.
+**EarHop-Windows-Setup-1.4.4.exe** from the [latest release](https://github.com/akbehera5000/earhop/releases/latest)
+installs EarHop for your Windows account (no administrator rights, no .NET needed) in
+`%LOCALAPPDATA%\Programs\EarHop`, with a Start menu entry, an entry in Settings, Apps, Installed apps (Uninstall) and
+start at sign-in. Running a newer setup updates it and keeps your settings.
 
 1. **Pair the earbuds with the PC once** in Settings, Bluetooth and devices. EarHop then connects and disconnects them
    itself, the way the Sound settings Connect button does.
-2. **Start EarHop.exe.** Windows SmartScreen may warn about an unknown publisher (the file is not signed): More info,
+2. **Run the setup.** Windows SmartScreen may warn about an unknown publisher (the file is not signed): More info,
    Run anyway. When Windows Firewall asks, allow EarHop on **private** networks (it uses UDP 47474 and TCP 47475).
-3. **Settings opens by itself the first time.** Give the PC its own name (for example `pc`), paste the secret from the
-   Mac (Settings, Network: copy the secret or its `earhop://pair` link), pick the earbuds, and Save.
-4. **Set Connection to Both on your other devices.** The PC sends its status over Wi-Fi only (it listens to Bluetooth
-   but does not advertise yet), and a device set to Bluetooth only ignores Wi-Fi status.
-5. The EarHop icon sits in the tray (click the ^ next to the clock to find it). Its menu shows the state, your devices,
-   Take and Release, Automatic switching, Send clipboard now, Send files, Settings, Copy diagnostics and the log folder.
-   Files can also be sent from Explorer: right click, Send to, **EarHop (send to a device)**.
+3. **The Pairing page opens the first time.** Give the PC its own name (for example `pc`) and paste the pairing link
+   from the Mac or Android app (Settings, Pairing, Copy Pairing Link), then Save.
+4. **Click the EarHop icon** in the tray (the ^ next to the clock). The flyout shows your earbuds with battery, Take
+   and Release, earbud controls, Switching and Clipboard, and your devices. Settings has pages for General, Devices,
+   Earbuds, Switching, Clipboard, Pairing, Connection, History and Log. Files can also be sent from Explorer: right
+   click, Send to, **EarHop (send to a device)**.
 
-What the Windows app does not do yet: ear detection (it never pauses when you take an earbud out; it switches as if
-the earbuds are in), Bluetooth status advertising and Bluetooth clipboard (Wi-Fi only), Galaxy Buds controls,
-battery levels, volume handover and shared settings. Log: `%APPDATA%\EarHop\earhop.log`.
+The PC sends its status over Wi-Fi and Bluetooth LE, syncs the clipboard over both, reads Galaxy Buds battery, ear
+state, noise control and equalizer while they are connected to it, and warns when Windows Firewall or a Public network
+keeps your devices out. Not yet on Windows: AirPods ear detection and battery, volume handover and shared settings.
+Log: `%APPDATA%\EarHop\earhop.log`.
 
 Build it on the Mac: `bash windows/build.sh` (needs the .NET 8 SDK from Microsoft's `dotnet-install.sh` in `~/.dotnet`;
-the Homebrew build cannot target Windows).
+the Homebrew build cannot target Windows). The built exe is also the installer when named `EarHop-Setup-x.y.z.exe`.
 
 ## Permissions explained
 
