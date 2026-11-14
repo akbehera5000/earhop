@@ -147,23 +147,56 @@ sealed class BtAudio
     /// <summary>Whether any endpoint of the earbuds is known to Windows (they were paired here).</summary>
     public bool Known() => Endpoints(DeviceState.Active | DeviceState.Unplugged | DeviceState.Disabled).Any();
 
-    /// <summary>Asks the Bluetooth audio driver to connect the earbuds. Returns how many endpoints accepted it.</summary>
-    public int Connect() => OneShot(Ks.OneshotReconnect, render: true);
+    /// <summary>Asks the Bluetooth audio driver to connect the earbuds. Returns how many endpoints accepted it. Asks the
+    /// music (render) endpoints first and the hands-free ones too when none accepted. Endpoints of earbuds that are on
+    /// another device are often "not present" in Windows, so those are asked as well.</summary>
+    public int Connect()
+    {
+        int n = OneShot(Ks.OneshotReconnect, render: true);
+        if (n == 0) n = OneShot(Ks.OneshotReconnect, render: false);
+        return n;
+    }
+
+    /// <summary>The earbuds' endpoints and their states, for the log when a connect fails.</summary>
+    public string Describe()
+    {
+        try
+        {
+            var parts = Endpoints(DeviceState.All).Select(d => { try { return $"{d.FriendlyName} [{d.DataFlow}, {d.State}]"; } catch { return "?"; } }).ToList();
+            return parts.Count == 0 ? $"no audio endpoint contains \"{NameFilter}\"" : string.Join("; ", parts);
+        }
+        catch (Exception e) { return e.Message; }
+    }
 
     /// <summary>Asks the driver to disconnect every audio profile of the earbuds (music and hands-free).</summary>
     public int Disconnect() => OneShot(Ks.OneshotDisconnect, render: false);
 
+    /// <summary>Runs the one-shot request on its own multithreaded (MTA) COM thread: Core Audio's topology objects
+    /// cannot be reached from an STA thread (tested: "Specified cast is not valid"). The calls themselves go through
+    /// the raw COM tables (Ks), so no .NET cast can fail on the Bluetooth endpoints, as it did on the owner's PC.</summary>
     private int OneShot(uint id, bool render)
+    {
+        int result = 0;
+        var t = new Thread(() => { try { result = OneShotHere(id, render); } catch (Exception e) { Log.Write($"bt: {e.Message}"); } })
+        { IsBackground = true, Name = "earhop-bt" };
+        t.SetApartmentState(ApartmentState.MTA);
+        t.Start();
+        t.Join(TimeSpan.FromSeconds(10));
+        return result;
+    }
+
+    private int OneShotHere(uint id, bool render)
     {
         int ok = 0;
         var done = new HashSet<string>();
-        foreach (var d in Endpoints(DeviceState.Active | DeviceState.Unplugged).ToList())
+        foreach (var d in Endpoints(DeviceState.Active | DeviceState.Unplugged | DeviceState.NotPresent).ToList())
         {
             try
             {
                 if (render && d.DataFlow != DataFlow.Render) continue;
-                var filterId = Ks.FilterId(d.ID);
-                if (filterId == null || !done.Add(filterId)) continue;
+                var filterId = Ks.FilterId(d.ID, out var why);
+                if (filterId == null) { Log.Write($"bt: no driver filter behind {d.FriendlyName} ({d.State}): {why}"); continue; }
+                if (!done.Add(filterId)) continue;
                 int hr = Ks.Send(filterId, id);
                 if (hr == 0) ok++;
                 else Log.Write($"bt: {(id == Ks.OneshotReconnect ? "connect" : "disconnect")} on {d.FriendlyName} returned 0x{hr:x8}");
@@ -247,29 +280,88 @@ static class Ks
 
     private static IMMDeviceEnumerator Enumerator() => (IMMDeviceEnumerator)new MMDeviceEnumeratorCo();
 
-    /// <summary>The kernel streaming filter behind an audio endpoint: the device its first connector is wired to.</summary>
-    public static string? FilterId(string endpointId)
+    // Raw COM calls through the interfaces' function tables. IMMDevice: QueryInterface, AddRef, Release, Activate (3).
+    // IDeviceTopology: GetConnectorCount (3), GetConnector (4). IConnector: GetDeviceIdConnectedTo (10).
+    // IKsControl: KsProperty (3). Every step returns its HRESULT, so a refusal is logged precisely.
+    private static unsafe int Call(IntPtr obj, int slot, Func<IntPtr, int> invoke) => invoke((*(IntPtr**)obj)[slot]);
+
+    private static unsafe int ActivateRaw(string deviceId, Guid iid, out IntPtr iface)
     {
+        iface = IntPtr.Zero;
         var en = Enumerator();
-        if (en.GetDevice(endpointId, out var dev) != 0) return null;
-        var iid = typeof(IDeviceTopology).GUID;
-        if (dev.Activate(ref iid, ClsctxAll, IntPtr.Zero, out var t) != 0) return null;
-        var topo = (IDeviceTopology)t;
-        if (topo.GetConnectorCount(out uint n) != 0 || n == 0) return null;
-        if (topo.GetConnector(0, out var conn) != 0) return null;
-        return conn.GetDeviceIdConnectedTo(out var id) == 0 ? id : null;
+        int hr = en.GetDevice(deviceId, out var dev);
+        if (hr != 0) return hr;
+        var unk = Marshal.GetComInterfaceForObject(dev, typeof(IMMDevice));
+        try
+        {
+            IntPtr result = IntPtr.Zero;
+            var fn = (delegate* unmanaged[Stdcall]<IntPtr, Guid*, int, IntPtr, IntPtr*, int>)(*(IntPtr**)unk)[3];
+            hr = fn(unk, &iid, ClsctxAll, IntPtr.Zero, &result);
+            iface = result;
+            return hr;
+        }
+        finally { Marshal.Release(unk); }
+    }
+
+    /// <summary>The kernel streaming filter behind an audio endpoint: the device its first connector is wired to.</summary>
+    public static unsafe string? FilterId(string endpointId) => FilterId(endpointId, out _);
+
+    public static unsafe string? FilterId(string endpointId, out string why)
+    {
+        why = "";
+        int hr = ActivateRaw(endpointId, typeof(IDeviceTopology).GUID, out var topo);
+        if (hr != 0) { why = $"topology 0x{hr:x8}"; return null; }
+        try
+        {
+            uint n = 0;
+            hr = ((delegate* unmanaged[Stdcall]<IntPtr, uint*, int>)(*(IntPtr**)topo)[3])(topo, &n);
+            if (hr != 0 || n == 0) { why = $"connectors 0x{hr:x8} ({n})"; return null; }
+            IntPtr conn = IntPtr.Zero;
+            hr = ((delegate* unmanaged[Stdcall]<IntPtr, uint, IntPtr*, int>)(*(IntPtr**)topo)[4])(topo, 0, &conn);
+            if (hr != 0) { why = $"connector 0x{hr:x8}"; return null; }
+            try
+            {
+                IntPtr str = IntPtr.Zero;
+                hr = ((delegate* unmanaged[Stdcall]<IntPtr, IntPtr*, int>)(*(IntPtr**)conn)[10])(conn, &str);
+                if (hr != 0) { why = $"connected device 0x{hr:x8}"; return null; }
+                var id = Marshal.PtrToStringUni(str);
+                Marshal.FreeCoTaskMem(str);
+                return id;
+            }
+            finally { Marshal.Release(conn); }
+        }
+        finally { Marshal.Release(topo); }
     }
 
     /// <summary>Sends a one-shot Bluetooth audio property (connect or disconnect) to a filter; returns the HRESULT.</summary>
-    public static int Send(string filterId, uint id)
+    public static unsafe int Send(string filterId, uint id)
     {
-        var en = Enumerator();
-        int hr = en.GetDevice(filterId, out var dev);
+        int hr = ActivateRaw(filterId, typeof(IKsControl).GUID, out var ks);
         if (hr != 0) return hr;
-        var iid = typeof(IKsControl).GUID;
-        hr = dev.Activate(ref iid, ClsctxAll, IntPtr.Zero, out var k);
-        if (hr != 0) return hr;
-        var prop = new KsProperty { Set = BtAudioSet, Id = id, Flags = KsPropertyTypeGet };
-        return ((IKsControl)k).KsProperty(ref prop, (uint)Marshal.SizeOf<KsProperty>(), IntPtr.Zero, 0, out _);
+        try
+        {
+            var prop = new KsProperty { Set = BtAudioSet, Id = id, Flags = KsPropertyTypeGet };
+            uint returned = 0;
+            var fn = (delegate* unmanaged[Stdcall]<IntPtr, KsProperty*, uint, IntPtr, uint, uint*, int>)(*(IntPtr**)ks)[3];
+            return fn(ks, &prop, (uint)sizeof(KsProperty), IntPtr.Zero, 0, &returned);
+        }
+        finally { Marshal.Release(ks); }
     }
+
+    /// <summary>Diagnostics only: walks endpoint, topology, filter and IKsControl like a connect does, without sending
+    /// anything, and says where it stops (EarHop.exe --kstest).</summary>
+    public static string Probe(string endpointId)
+    {
+        try
+        {
+            var filter = FilterId(endpointId, out var why);
+            if (filter == null) return $"no filter ({why})";
+            int hr = ActivateRaw(filter, typeof(IKsControl).GUID, out var ks);
+            if (hr != 0) return $"IKsControl 0x{hr:x8}";
+            Marshal.Release(ks);
+            return "ok";
+        }
+        catch (Exception e) { return $"{e.GetType().Name}: {e.Message}"; }
+    }
+
 }

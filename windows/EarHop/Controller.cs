@@ -23,6 +23,11 @@ sealed class Controller
     public bool AutoOff => !cfg.AutoSwitch || PausedUntil > DateTime.UtcNow;
     public event Action<string, string>? OnEvent; // (kind, text)
     public Func<string?> AutoGate = () => null;
+    /// <summary>Brings up the Bluetooth link to the earbuds another way (the Buds' serial channel), for a claim whose
+    /// connect request did not work. Returns true when the link came up.</summary>
+    public Func<Task<bool>>? Nudge;
+    /// <summary>Runs on the UI thread right before a release (closes the Buds status channel first).</summary>
+    public Action? BeforeRelease;
     private readonly SynchronizationContext ui;
 
     public Controller(Config cfg, BtAudio bt)
@@ -76,6 +81,17 @@ sealed class Controller
         lock (gate)
             return peers.Values.Select(p => new HandoffPeer(p.Status.Dev, p.Status.Playing, p.Status.Ear, p.Status.Owner, p.Status.Call,
                                                             p.SeenAt, p.PlayingSince, p.LastPlayingAt, p.Status.Att)).ToList();
+    }
+
+    /// <summary>Which earbuds the device that holds them reports (its "prof"), for the Automatic earbuds choice.</summary>
+    public string? OwnerProfile()
+    {
+        lock (gate)
+        {
+            var now = DateTime.UtcNow;
+            var p = peers.Values.FirstOrDefault(p => p.Status.Owner && (now - p.SeenAt).TotalSeconds < 10 && p.Status.Prof is "buds" or "airpods");
+            return p?.Status.Prof;
+        }
     }
 
     public string? OwnerPeer()
@@ -142,20 +158,35 @@ sealed class Controller
                         Log.Write($"claim: waited {waited:0.0} s for {holder} to let go");
                     }
                     var started = DateTime.UtcNow;
-                    int waits = cfg.IsBuds ? 150 : 60;
-                    for (int attempt = 1; attempt <= 2 && !ok; attempt++)
+                    // First a plain connect request, given 6 s. Then, if the earbuds did not come, the link is brought up
+                    // another way (the Buds' serial channel) and the request is sent again, with the full wait.
+                    for (int attempt = 1; attempt <= 3 && !ok; attempt++)
                     {
                         if (bt.Connected()) { ok = true; break; }
                         Stage = "Connecting here";
+                        if (attempt == 2 && Nudge != null)
+                        {
+                            bool up = false;
+                            try { up = Nudge().GetAwaiter().GetResult(); } catch (Exception e) { Log.Write($"connect: link nudge failed: {e.Message}"); }
+                            Log.Write($"connect: Bluetooth link {(up ? "opened through the Buds channel" : "could not be opened")}, asking again");
+                        }
                         int accepted = bt.Connect();
-                        if (accepted == 0) Log.Write("connect: the Bluetooth audio driver refused the connect request");
+                        Log.Write($"connect: attempt {attempt}, {accepted} endpoint(s) accepted the request");
+                        if (accepted == 0)
+                        {
+                            Log.Write($"connect: the Bluetooth audio driver refused the connect request. Endpoints: {bt.Describe()}");
+                            // Refused: no point waiting for it, bring the link up the other way at once.
+                            if (attempt == 1 && Nudge != null) { Emit("info", "Connect request refused, opening the link another way"); continue; }
+                        }
+                        // The first request gets 4 s (Windows' own Connect takes about 2 to 4 s), later ones the full wait.
+                        int waits = attempt == 1 ? 40 : cfg.IsBuds ? 150 : 80;
                         for (int i = 0; i < waits; i++)
                         {
                             Thread.Sleep(100);
                             if (i == 10) Stage = "Confirming connection";
                             if (bt.Connected()) { ok = true; break; }
                         }
-                        if (!ok && attempt == 1) Emit("info", "Claim did not connect, retrying once");
+                        if (!ok && attempt < 3) Log.Write($"connect: not connected yet after attempt {attempt}, trying again ({attempt + 1} of 3)");
                     }
                     if (ok) Log.Write($"claim: link up {(DateTime.UtcNow - started).TotalSeconds:0.0} s after connect started");
                     else why = OwnerPeer() is string h ? $"{h} is still connected to the {name}" : $"the {name} did not accept the connection. Connect them from Bluetooth settings";
@@ -177,6 +208,7 @@ sealed class Controller
         string name = cfg.EarbudsShort;
         if (!cfg.LiveMode) { Emit("release", $"would release {name} ({reason})", true); return; }
         Stage = $"Releasing {name}";
+        try { BeforeRelease?.Invoke(); } catch (Exception e) { Log.Write($"release: {e.Message}"); }
         Task.Run(() =>
         {
             var started = DateTime.UtcNow;

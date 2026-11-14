@@ -17,6 +17,10 @@ public sealed class Config
     public string BudsName { get; set; } = "Buds2 Pro";
     public string AirPodsName { get; set; } = "AirPods";
     public bool AutoSwitch { get; set; } = true;
+    /// <summary>"auto": follow the pair connected here or held by another device; "manual": Earbuds below.</summary>
+    public string EarbudsMode { get; set; } = "auto";
+    public bool PauseWhenOneOut { get; set; } = true;
+    public double ResumeWithinSeconds { get; set; } = 120;
     public bool LiveMode { get; set; } = true;
     public List<string> Priority { get; set; } = new() { "mac", "tab", "phone" };
     public double CooldownSeconds { get; set; } = 2;
@@ -25,6 +29,8 @@ public sealed class Config
     public double ReleaseAfterOutSeconds { get; set; } = 120;
     public int SafeModeAfterFailures { get; set; } = 3;
     public bool ClipSync { get; set; } = true;
+    /// <summary>Which link carries clips: "both" (Bluetooth for text, Wi-Fi as fallback and for images), "ble", "wifi".</summary>
+    public string ClipTransport { get; set; } = "both";
     public bool ClipAuto { get; set; } = true;
     public bool ClipReceive { get; set; } = true;
     public bool ClipImages { get; set; } = true;
@@ -78,8 +84,9 @@ public sealed class Config
     {
         DeviceName = DeviceName, Priority = new(Priority), Live = LiveMode, Cooldown = CooldownSeconds, MinPlay = MinPlaySeconds,
         Quiet = QuietSeconds, ReleaseAfterOut = ReleaseAfterOutSeconds, SafeModeAfter = SafeModeAfterFailures,
-        // Windows has no ear reading yet (no Buds channel or AirPods beacon here), so an unknown ear counts as in,
-        // like Android without a working ear source.
+        PauseWhenOneOut = PauseWhenOneOut, ResumeWithin = ResumeWithinSeconds,
+        // The Buds channel gives a real ear reading while it is open; without one an unknown ear counts as in, like
+        // Android without a working ear source.
         RequireEar = false,
     };
 

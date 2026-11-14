@@ -137,6 +137,74 @@ Check("addresses: newest when none is fresh", AddressBook.Current(new List<strin
     try { Directory.Delete(dir, true); } catch { }
 }
 
+// Galaxy Buds protocol, the same checks as the Mac (main.swift self test).
+static byte[] BFrame(byte id, byte[] p) { int size = 1 + p.Length + 2; return new byte[] { 0xFD, (byte)(size & 0xFF), (byte)(size >> 8), id }.Concat(p).Concat(new byte[] { 0, 0, 0xDD }).ToArray(); }
+static byte[] BExt(byte pl) { var p = new byte[40]; p[6] = pl; return p; }
+static BudsProtocol.State BState(byte id, byte[] p) { var f = BFrame(id, p).ToList(); var st = new BudsProtocol.State(); foreach (var m in BudsProtocol.Extract(f)) st = BudsProtocol.Apply(m, st); return st; }
+var bb = BFrame(0x61, BExt(0x11)).ToList(); var bm = BudsProtocol.Extract(bb);
+Check("buds frame", bm.Count == 1 && bb.Count == 0);
+Check("buds both", BState(0x61, BExt(0x11)).Ear == Ear.Both);
+Check("buds one", BState(0x61, BExt(0x12)).Ear == Ear.One && BState(0x61, BExt(0x21)).Ear == Ear.One);
+Check("buds none", BState(0x61, BExt(0x22)).Ear == Ear.None);
+Check("buds case is none", BState(0x61, BExt(0x34)).Ear == Ear.None);
+Check("buds partial", BudsProtocol.Extract(BFrame(0x61, BExt(0x11)).Take(6).ToList()).Count == 0);
+Check("buds crc check value", BudsProtocol.Crc16(Encoding.ASCII.GetBytes("123456789")) == 0x31C3);
+var encMsgs = BudsProtocol.Extract(BudsProtocol.NoiseCommand("anc").ToList());
+Check("buds encode roundtrip", encMsgs.Count == 1 && encMsgs[0].Id == BudsProtocol.IdNoise && encMsgs[0].Payload.SequenceEqual(new byte[] { 1 }));
+var full = new byte[40]; full[0] = 5; full[2] = 80; full[3] = 70; full[6] = 0x12; full[7] = 55; full[9] = 3; full[10] = 0x8F; full[12] = 2;
+var fs = BState(0x61, full);
+Check("buds full status", fs.Noise == "ambient" && fs.Eq == "dynamic" && fs.BattL == 80 && fs.BattR == 70 && fs.BattCase == 55 && fs.TouchOn == true && fs.Ear == Ear.One && fs.PlaceR == "idle");
+var as1 = BudsProtocol.Apply(new BudsProtocol.Msg(BudsProtocol.IdAck, new byte[] { BudsProtocol.IdEqualizer, 4 }), new BudsProtocol.State());
+as1 = BudsProtocol.Apply(new BudsProtocol.Msg(BudsProtocol.IdNoiseUpdate, new byte[] { 1 }), as1);
+Check("buds ack and noise update", as1.Eq == "clear" && as1.Noise == "anc");
+var tc = BudsProtocol.Extract(BudsProtocol.TouchCommand(true, new BudsProtocol.State()).ToList());
+Check("buds touch command", tc.Count == 1 && tc[0].Payload.SequenceEqual(new byte[] { 1, 1, 1, 1, 1, 0, 0 }));
+static byte[] Ext13(byte place) { var p = new byte[13]; p[0] = 5; p[2] = 80; p[3] = 70; p[6] = place; return p; }
+static byte[] ZeroCrc(int id, byte[] p) { var f = BudsProtocol.Encode(id, p); f[^3] = 0; f[^2] = 0; return f; }
+var crcA = new BudsProtocol.CrcStats();
+Check("buds good checksum counted", BudsProtocol.Extract(BudsProtocol.Encode(0x61, Ext13(0x11)).ToList(), crcA).Count == 1 && crcA.Good == 1 && crcA.Enforcing);
+var crcB = new BudsProtocol.CrcStats();
+Check("buds bad checksum kept before verified", BudsProtocol.Extract(ZeroCrc(0x61, Ext13(0x22)).ToList(), crcB).Count == 1 && crcB.Bad == 1);
+BudsProtocol.Extract(BudsProtocol.Encode(0x61, Ext13(0x11)).ToList(), crcB);
+var md = BudsProtocol.Extract(ZeroCrc(0x61, Ext13(0x22)).Concat(BudsProtocol.Encode(0x61, Ext13(0x12))).ToList(), crcB);
+Check("buds bad checksum dropped once verified", md.Count == 1 && BudsProtocol.Apply(md[0], new BudsProtocol.State()).Ear == Ear.One);
+var fe = BudsProtocol.Encode(0x61, Ext13(0x11)); (fe[^3], fe[^2]) = (fe[^2], fe[^3]);
+var crcE = new BudsProtocol.CrcStats();
+Check("buds big endian checksum accepted", BudsProtocol.Extract(fe.ToList(), crcE).Count == 1 && crcE.Good == 1);
+var ff = new byte[] { 0xFD, 0xFF, 0x03, 0x61 }.Concat(BudsProtocol.Encode(0x61, Ext13(0x11))).ToList();
+Check("buds oversized length is junk", BudsProtocol.Extract(ff, new BudsProtocol.CrcStats()).Count == 1 && ff.Count == 0);
+
+// Bluetooth clipboard: routing, health and chunks, the same checks as the Mac.
+var rall = new[] { "phone", "tab" };
+var r1 = ClipRoute.Plan("text", 100, "both", rall, new[] { "phone", "tab" }, new[] { "phone", "tab" });
+Check("route: text over Bluetooth only when Bluetooth reaches", r1.Ble.SetEquals(rall) && r1.Wifi.Count == 0);
+var r2 = ClipRoute.Plan("text", 100, "both", rall, new[] { "phone" }, new[] { "phone", "tab" });
+Check("route: text over Wi-Fi to a device Bluetooth cannot reach", r2.Ble.SetEquals(new[] { "phone" }) && r2.Wifi.SetEquals(new[] { "tab" }));
+var r3 = ClipRoute.Plan("image", 20000, "both", rall, new[] { "phone", "tab" }, new[] { "phone" });
+Check("route: image over Wi-Fi, Bluetooth only without a Wi-Fi route", r3.Wifi.SetEquals(new[] { "phone" }) && r3.Ble.SetEquals(new[] { "tab" }));
+var r4 = ClipRoute.Plan("image", 900000, "both", rall, new[] { "phone", "tab" }, Array.Empty<string>());
+Check("route: a large image never goes over Bluetooth", r4.Ble.Count == 0 && r4.Wifi.Count == 0);
+var r5 = ClipRoute.Plan("text", 100, "wifi", rall, rall, rall);
+Check("route: Wi-Fi mode never uses Bluetooth", r5.Ble.Count == 0 && r5.Wifi.SetEquals(rall));
+var bh = new BleHealth(); var bt0 = DateTime.UtcNow;
+bh.Report("tab", false, false, bt0);
+Check("ble health: one failure does not rest the device", bh.Usable("tab", bt0));
+bh.Report("tab", false, false, bt0);
+Check("ble health: two failures rest it 2 min", !bh.Usable("tab", bt0.AddSeconds(60)) && bh.Usable("tab", bt0.AddSeconds(121)));
+bh.Report("phone", false, true, bt0);
+Check("ble health: a pairing refusal stops tries for 6 hours", !bh.Usable("phone", bt0.AddHours(5)) && bh.NeedsPairing("phone"));
+Check("ble health: works again after success", bh.Report("tab", true, false, bt0) != null && bh.Usable("tab", bt0));
+Check("ble health: a device that worked counts as paired", bh.KnownGood("tab") && !bh.KnownGood("phone"));
+bh.Paired("phone");
+Check("ble health: Bluetooth from a device clears its pairing note", bh.KnownGood("phone") && !bh.NeedsPairing("phone") && bh.Usable("phone", bt0));
+var bigFrame = ClipCodec.Encode(new ClipItem("a", "mac", "text", "text/plain", 1, Enumerable.Repeat((byte)65, 5000).ToArray()), "k")!;
+var chunks = ClipChunks.Split(bigFrame, 172, 7);
+var asm = new ClipChunks.Assembler();
+byte[]? assembled = null;
+foreach (var c in Enumerable.Reverse(chunks)) if (asm.Add(c, "x", DateTime.UtcNow) is byte[] w) assembled = w;
+Check("chunks: split and reassembled in any order", chunks.Count == (bigFrame.Length + 171) / 172 && chunks.All(c => c.Length <= 180) && assembled != null && assembled.SequenceEqual(bigFrame));
+Check("chunks: a 17 KB text fits Bluetooth", ClipRoute.Plan("text", 17073, "both", new[] { "mac" }, new[] { "mac" }, new[] { "mac" }).Ble.Contains("mac"));
+
 HandoffSim.RunAll(Check);
 HandoffSim.DefaultConnect = 7; HandoffSim.DefaultDisconnect = 1.5;
 HandoffSim.RunAll((n, ok) => Check("real timing: " + n, ok));

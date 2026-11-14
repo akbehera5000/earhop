@@ -11,6 +11,9 @@ static class Program
     [STAThread]
     static void Main(string[] args)
     {
+        if (args.Length > 0 && args[0] == "--kstest") { KsTest(); return; }
+        if (args.Contains("--uninstall")) { Application.EnableVisualStyles(); Installer.Uninstall(args.Contains("--quiet")); return; }
+        if (Installer.IsSetup(args)) { Installer.RunSetup(); return; }
         var files = args.Where(a => !a.StartsWith("--")).ToList();
         using var single = new Mutex(true, MutexName, out bool first);
         if (!first)
@@ -27,17 +30,38 @@ static class Program
         AppDomain.CurrentDomain.UnhandledException += (_, e) => Log.Write($"crash: {e.ExceptionObject}");
         var app = new TrayApp(Config.Load());
         if (files.Count > 0) SynchronizationContext.Current?.Post(_ => PipeServer.Deliver(files), null);
+        if (args.FirstOrDefault(a => a.StartsWith("--settings=")) is string page)
+            SynchronizationContext.Current?.Post(_ => app.ShowSettings(page["--settings=".Length..]), null);
+        if (args.Contains("--flyout")) SynchronizationContext.Current?.Post(_ => app.ShowFlyout(), null);
         Application.Run(app);
         // A new name or secret: start again once this instance has let go of the single-instance lock.
         if (RestartRequested && Environment.ProcessPath is string exe)
         {
             single.ReleaseMutex();
             single.Dispose();
-            System.Diagnostics.Process.Start(exe, "--background");
+            System.Diagnostics.Process.Start(exe, RestartPage != null ? $"--background --settings={RestartPage}" : "--background");
         }
     }
 
     public static bool RestartRequested;
+
+    /// <summary>Checks, for every render endpoint, whether the kernel streaming control can be reached from an MTA and
+    /// from an STA thread (no property is sent). Writes the result to the log.</summary>
+    private static void KsTest()
+    {
+        var ids = new List<(string Name, string Id)>();
+        using (var en = new NAudio.CoreAudioApi.MMDeviceEnumerator())
+            foreach (var d in en.EnumerateAudioEndPoints(NAudio.CoreAudioApi.DataFlow.All, NAudio.CoreAudioApi.DeviceState.All))
+                try { ids.Add((d.FriendlyName, d.ID)); } catch { }
+        foreach (var apt in new[] { ApartmentState.MTA, ApartmentState.STA })
+        {
+            var t = new Thread(() => { foreach (var (n, id) in ids) Log.Write($"kstest {apt}: {n}: {Ks.Probe(id)}"); });
+            t.SetApartmentState(apt);
+            t.Start();
+            t.Join();
+        }
+    }
+    public static string? RestartPage;
 }
 
 /// <summary>Files from a second EarHop start (Explorer's Send to, EarHop.exe file.txt) reach the running EarHop through a

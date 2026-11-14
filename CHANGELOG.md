@@ -1,5 +1,75 @@
 # Changelog
 
+## 2026-11-15: Windows installer (EarHop-Setup-1.4.4.exe)
+
+* Windows: EarHop installs itself. Named EarHop-Setup-x.y.z.exe, the exe shows a Fluent setup window and installs per
+  user (no administrator rights, no certificate) to %LOCALAPPDATA%\Programs\EarHop: Start menu entry, optional desktop
+  shortcut, start at sign-in, and an entry in Settings, Apps, Installed apps. Running it again updates in place and
+  keeps the settings. "EarHop.exe --uninstall" (from Installed apps) removes the app, shortcuts, Send to entry and
+  start-up entry, and asks whether to keep the settings and the secret. Tried in Parallels: install, start, uninstall.
+* Not MSIX: a self-signed MSIX needs its certificate installed on every PC first, and the packaged app's sandbox
+  redirects %APPDATA% and needs extra declarations for Bluetooth, start-up and the Send to menu.
+
+## 2026-11-15: Windows 1.4.4, Bluetooth clipboard, faster Buds connect, flyout fixes
+
+* Windows: clipboard over Bluetooth LE (ClipBle): the GATT service EAC1B000 with the encrypted inbox (B001) and name
+  (B002), and a client with one queue per device, 172 byte chunks (smaller when the MTU is smaller), BleHealth backoff
+  and Wi-Fi as each device's fallback. Routing follows ClipRoute ("both", "ble", "wifi"; Clipboard page, Method).
+  ClipChunks, ClipRoute and BleHealth are in EarHop.Core with the Mac's checks (169 in all).
+* Fixed: every Buds connect and release logged "Specified cast is not valid" and never reached the Bluetooth audio
+  driver ("0 endpoint(s) accepted", "0 profiles asked"), so a claim took 18 to 31 s through the fallback and a release
+  left the Buds connected. The driver calls now go through the raw COM tables on an MTA thread and log the exact
+  HRESULT of any refusal. Tested in Parallels: STA fails with that cast error, MTA reaches IKsControl.
+* A refused connect request now goes to the Buds channel fallback at once instead of waiting 6 s; the first request
+  waits 4 s.
+* Fixed: "Only one usage of each socket address" on the Buds status channel: the claim's open and the regular open ran
+  together. Opens are serialized, and an address still in use is tried again once after 1.2 s.
+* Fixed: NullReferenceException in TrayApp.ToggleFlyout when the flyout lost the focus while it opened.
+* Flyout: smaller picture, Buds controls folded into one line, refreshed once a second and only changed parts are
+  rebuilt (the glow animation restarted on every refresh before, which made it lag).
+* The status advertisement goes straight to the GATT advertisement (this PC's publisher refused the 128 bit service
+  UUID) and retries every minute when Bluetooth is off.
+* Kept: the 1 to 2 s "waiting for playback to settle" before a claim is HandoffCore's MinPlay and Quiet guard against
+  false switches; not shortened.
+* Not tried on real hardware yet: Bluetooth clipboard, the connect timing, the release (Parallels has no Bluetooth).
+
+## 2026-11-14: Windows 1.4.3, Buds channel, connect fallback, network check, black UI
+
+* Windows: Galaxy Buds status channel (port of BudsProtocol in BudsWear.swift, with the Mac's 16 protocol checks in
+  the self test). While the Buds are connected here it reads battery, which bud is in an ear, noise control,
+  equalizer and touch lock; the ear reading goes into HandoffCore, so "pause when an earbud comes out" works on the
+  PC; the battery is shared with the other devices ("batt") like the Mac. The channel is closed before a release.
+* Windows: connecting the earbuds asks every endpoint of the pair, also the "not present" ones Windows keeps for
+  earbuds that are on another device, and the hands-free ones when no music endpoint accepts. When the earbuds did not
+  come after 6 s, the Bluetooth link is opened through the Buds channel and the request is sent again (three tries in
+  all, each logged with the endpoint states).
+* Windows: Automatic earbuds (the pair connected here, else the one the holding device reports), like the Mac.
+* Windows: detects when Windows Firewall keeps the other devices out (no Allow rule for this EarHop.exe on the current
+  network type, or a Block rule) and shows it in the flyout and Connection page with a button to the Windows page.
+  EarHop changes nothing itself.
+* Windows UI: black background everywhere, monochrome Fluent icons in the navigation, battery and Buds controls in
+  the flyout, smooth scrolling, a compact navigation pane and stacked setting rows on narrow windows.
+* Not tried on real hardware yet: the Buds channel, the connect fallback, ear pause (Parallels has no Bluetooth).
+
+## 2026-11-14: Windows 1.4.2, Fluent UI, status over Bluetooth LE, hello
+
+* Windows: new Fluent Design 2 interface in WPF. The tray icon opens a flyout like the Mac popover (earbuds picker, a
+  live picture of Galaxy Buds2 Pro or AirPods Pro that changes with the choice, Take and Release, why it is not
+  switching, Switching and Clipboard tiles, the other devices, Settings, Copy Log, Quit), with Acrylic on Windows 11.
+  Settings is a Windows 11 style window with Mica and pages for General, Devices, Earbuds, Switching, Clipboard,
+  Pairing (name, secret, pairing link, QR code, new secret), Connection, History and Log. Follows light or dark mode.
+  The WinForms settings form is gone.
+* Windows: sends its status over Bluetooth LE too (the v4 payload as a 128 bit service UUID; GATT service
+  advertisement when the publisher refuses), so devices set to Connection "Bluetooth" hear the PC. Backs off for a
+  minute when the radio is off. Not yet tried on a PC with a Bluetooth radio.
+* Windows: sends the "hello" control message (start, new device, every 10 minutes), so the PC shows as a Windows PC on
+  the other devices; reads their hello for icons and "batt" for the earbud battery.
+* Tried in Parallels Windows 11 (arm64) against the Mac app over Wi-Fi: the PC and the Mac hear each other, the Mac
+  shows the PC as a Windows PC, text goes both ways. Not tried there: Bluetooth, real earbuds, playing detection (the
+  VM has no working audio output).
+* Note: the separate rewrite in "EarHop Windows" on the Desktop used its own status and clip formats and a hex-only
+  secret, so the other devices could not understand it. It is replaced by this app.
+
 ## 2026-11-13: Mac popover earbuds selector, stuck menu bar tooltip
 
 * Popover: the earbuds choice (Automatic, AirPods, Galaxy Buds) is a horizontal selector under the header, like

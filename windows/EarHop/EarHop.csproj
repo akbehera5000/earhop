@@ -6,12 +6,14 @@
     <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
     <SupportedOSPlatformVersion>10.0.19041.0</SupportedOSPlatformVersion>
     <UseWindowsForms>true</UseWindowsForms>
+    <UseWPF>true</UseWPF>
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
     <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>EarHop.Win</RootNamespace>
     <AssemblyName>EarHop</AssemblyName>
-    <Version>1.4.1</Version>
+    <Version>1.4.4</Version>
     <Product>EarHop</Product>
     <ApplicationIcon>EarHop.ico</ApplicationIcon>
     <ApplicationManifest>app.manifest</ApplicationManifest>
@@ -27,6 +29,8 @@
     <ProjectReference Include="../EarHop.Core/EarHop.Core.csproj" />
     <!-- MIT licensed (github.com/naudio/NAudio): Core Audio sessions, peak meters and endpoints. -->
     <PackageReference Include="NAudio.Wasapi" Version="2.2.1" />
+    <!-- MIT licensed (github.com/codebude/QRCoder): the pairing QR code on the Pairing page. -->
+    <PackageReference Include="QRCoder" Version="1.6.0" />
   </ItemGroup>
   <ItemGroup>
     <EmbeddedResource Include="EarHop.ico" />

@@ -30,6 +30,9 @@ sealed class ClipSync : IDisposable
     public event Action<string, string>? OnFileReceived; // (path, from)
     public event Action<ClipItem>? OnControl;
     public bool Listening => tcp.Listening;
+    /// <summary>Bluetooth LE clipboard (service and client) and the devices it can reach now (dev, address).</summary>
+    public readonly ClipBle Ble = new();
+    public Func<List<(string Dev, ulong Address)>> BlePeers = () => new();
 
     public ClipSync(Config cfg, UdpLink link)
     {
@@ -48,6 +51,9 @@ sealed class ClipSync : IDisposable
         tcp.AcceptFile = AcceptFile;
         tcp.OnFile = (item, path) => ui.Post(_ => FileDone(item, path), null);
         tcp.Start();
+        Ble.SelfName = cfg.DeviceName;
+        Ble.OnFrame = f => Receive(f);
+        _ = Ble.Start();
     }
 
     /// <summary>Devices reachable over Wi-Fi now, without this one and the excluded ones (unless named in `only`).</summary>
@@ -57,18 +63,38 @@ sealed class ClipSync : IDisposable
         return link.PeerHostsByDev().Where(p => p.Dev != cfg.DeviceName && (only?.Contains(p.Dev) ?? !skip.Contains(p.Dev))).ToList();
     }
 
-    public List<string> Devices() => Targets(null).Select(t => t.Dev).Distinct().OrderBy(x => x, StringComparer.Ordinal).ToList();
+    /// <summary>Devices reachable now over Wi-Fi or Bluetooth LE, without this one and the excluded ones.</summary>
+    public List<string> Devices() => Targets(null).Select(t => t.Dev).Concat(BleTargets(null).Select(p => p.Dev)).Distinct().OrderBy(x => x, StringComparer.Ordinal).ToList();
+    public List<string> WifiDevices() => Targets(null).Select(t => t.Dev).Distinct().ToList();
+    public List<string> BleDevices() => BleTargets(null).Select(p => p.Dev).Distinct().ToList();
 
-    private int Deliver(byte[] frame, ICollection<string>? only)
+    private List<(string Dev, ulong Address)> BleTargets(ICollection<string>? only)
     {
-        var targets = Targets(only);
-        // One address per device is enough when it works; try the next ones only after a failure.
-        foreach (var g in targets.GroupBy(t => t.Dev))
+        var skip = cfg.ClipExclude.ToHashSet();
+        return BlePeers().Where(p => p.Dev != cfg.DeviceName && (only?.Contains(p.Dev) ?? !skip.Contains(p.Dev))).ToList();
+    }
+
+    /// <summary>Sends a frame by the routing rule (ClipRoute): text and small messages over Bluetooth with Wi-Fi as each
+    /// device's fallback, images over Wi-Fi. Returns the devices it went to and the links used.</summary>
+    private (List<string> Devs, string Via) Deliver(byte[] frame, string kind, ICollection<string>? only)
+    {
+        var wifi = Targets(only);
+        var ble = BleTargets(only);
+        var now = DateTime.UtcNow;
+        var names = wifi.Select(t => t.Dev).Concat(ble.Select(p => p.Dev)).ToHashSet();
+        var route = ClipRoute.Plan(kind, frame.Length, cfg.ClipTransport, names,
+                                   ble.Where(p => Ble.Health.Usable(p.Dev, now)).Select(p => p.Dev), wifi.Select(t => t.Dev));
+        void ViaWifi(string dev)
         {
-            var hosts = g.Select(x => x.Host).ToList();
-            _ = Task.Run(async () => { foreach (var h in hosts) if (await tcp.Send(frame, h)) break; });
+            // One address per device is enough when it works; try the next ones only after a failure.
+            var hosts = wifi.Where(t => t.Dev == dev).Select(t => t.Host).ToList();
+            if (hosts.Count > 0) _ = Task.Run(async () => { foreach (var h in hosts) if (await tcp.Send(frame, h)) break; });
         }
-        return targets.Select(t => t.Dev).Distinct().Count();
+        if (route.Ble.Count > 0) Ble.Send(frame, ble.Where(p => route.Ble.Contains(p.Dev)).GroupBy(p => p.Dev).Select(g => g.First()), kind is "text" or "link", ViaWifi);
+        foreach (var d in route.Wifi) ViaWifi(d);
+        var devs = route.Ble.Concat(route.Wifi).Distinct().ToList();
+        string via = route.Ble.Count > 0 && route.Wifi.Count > 0 ? "Bluetooth and Wi-Fi" : route.Ble.Count > 0 ? "Bluetooth" : "Wi-Fi";
+        return (devs, via);
     }
 
     public void SendControl(string kind, byte[] data, string? to)
@@ -76,7 +102,7 @@ sealed class ClipSync : IDisposable
         var item = new ClipItem(ClipCodec.NewId(), cfg.DeviceName, kind, "application/octet-stream", Proto.NowMs(), data, to ?? "");
         if (ClipCodec.Encode(item, cfg.Secret) is not byte[] frame) return;
         Remember(item.Id);
-        Deliver(frame, to == null ? null : new[] { to });
+        Deliver(frame, kind, to == null ? null : new[] { to });
     }
 
     /// <summary>Called twice a second: quiet retries for devices that did not confirm, and give-ups after 60 s.</summary>
@@ -86,7 +112,7 @@ sealed class ClipSync : IDisposable
         foreach (var (id, devs) in Receipts.Due(now))
         {
             if (!outbox.TryGetValue(id, out var o)) continue;
-            Deliver(o.Frame, devs);
+            Deliver(o.Frame, o.Kind, devs);
             Log.Write($"clip: no receipt from {string.Join(", ", devs)} yet, sending again");
         }
         foreach (var (id, o) in outbox.ToList())
@@ -155,15 +181,15 @@ sealed class ClipSync : IDisposable
         var item = new ClipItem(ClipCodec.NewId(), cfg.DeviceName, kind, mime, Proto.NowMs(), data);
         if (ClipCodec.Encode(item, cfg.Secret) is not byte[] frame) return;
         Remember(item.Id);
-        var targets = Devices();
         string what = kind == "text" ? $"text ({data.Length} bytes)" : $"image ({data.Length / 1024} KB)";
-        if (Deliver(frame, null) == 0)
+        var (targets, via) = Deliver(frame, kind, null);
+        if (targets.Count == 0)
         {
-            Log.Write($"clip: {what} not sent, no other device on Wi-Fi");
-            OnEvent?.Invoke("Not sent, no device on Wi-Fi");
+            Log.Write($"clip: {what} not sent, no other device in reach");
+            OnEvent?.Invoke("Not sent, no device in reach");
             return;
         }
-        Log.Write($"clip: sent {what} over Wi-Fi");
+        Log.Write($"clip: sent {what} to {string.Join(", ", targets)} over {via}");
         Receipts.Track(item.Id, targets, DateTime.UtcNow);
         outbox[item.Id] = (frame, kind, DateTime.UtcNow);
         OnEvent?.Invoke($"Sent {(kind == "text" ? "text" : "an image")}");
@@ -207,7 +233,7 @@ sealed class ClipSync : IDisposable
         var item = new ClipItem(ClipCodec.NewId(), cfg.DeviceName, "link", "text/uri-list", Proto.NowMs(), Encoding.UTF8.GetBytes(url), dev);
         if (ClipCodec.Encode(item, cfg.Secret) is not byte[] frame) return;
         Remember(item.Id);
-        if (Deliver(frame, new[] { dev }) == 0) { OnEvent?.Invoke($"{DeviceNames.Pretty(dev)} is not in reach"); return; }
+        if (Deliver(frame, "link", new[] { dev }).Devs.Count == 0) { OnEvent?.Invoke($"{DeviceNames.Pretty(dev)} is not in reach"); return; }
         Receipts.Track(item.Id, new[] { dev }, DateTime.UtcNow);
         outbox[item.Id] = (frame, "link", DateTime.UtcNow);
         Log.Write($"link: sent to {dev}");
@@ -343,7 +369,7 @@ sealed class ClipSync : IDisposable
         OnFileReceived?.Invoke(dest, item.Dev);
     }
 
-    public void Dispose() => tcp.Dispose();
+    public void Dispose() { tcp.Dispose(); Ble.Dispose(); }
 }
 
 static class Native
@@ -357,6 +383,8 @@ static class Native
     [DllImport("user32.dll")] private static extern bool GetLastInputInfo(ref LastInputInfo info);
 
     /// <summary>Seconds since the last key press or mouse move on this PC (Follow my attention).</summary>
+    [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hwnd);
+
     public static double IdleSeconds()
     {
         var i = new LastInputInfo { Size = (uint)Marshal.SizeOf<LastInputInfo>() };
