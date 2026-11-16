@@ -187,6 +187,28 @@ sealed class BtAudio
 
     private int OneShotHere(uint id, bool render)
     {
+        // Straight to the driver, by the earbuds' Bluetooth address (no COM, see KsDirect).
+        string what = id == Ks.OneshotReconnect ? "connect" : "disconnect";
+        var address = BtAddress.Of(NameFilter);
+        {
+            var paths = KsDirect.Interfaces(address, NameFilter);
+            if (paths.Count == 0) Log.Write($"bt: no Bluetooth audio driver interface for \"{NameFilter}\" yet (are they paired with this PC?)");
+            int sent = 0;
+            foreach (var p in paths)
+            {
+                int err = KsDirect.Send(p, id);
+                bool music = !p.Contains("bthhfenum", StringComparison.OrdinalIgnoreCase) && !p.Contains("hfp", StringComparison.OrdinalIgnoreCase);
+                string kind = music ? "music" : "headset";
+                if (err == 0) sent++;
+                else Log.Write($"bt: {what} ({kind}) refused by the driver, error {err}");
+            }
+            if (sent > 0 || paths.Count > 0)
+            {
+                Log.Write($"bt: {what} sent to {sent} of {paths.Count} audio interface(s)");
+                return sent;
+            }
+        }
+        // Fallback: the endpoint topology route (older path).
         int ok = 0;
         var done = new HashSet<string>();
         foreach (var d in Endpoints(DeviceState.Active | DeviceState.Unplugged | DeviceState.NotPresent).ToList())
@@ -364,4 +386,135 @@ static class Ks
         catch (Exception e) { return $"{e.GetType().Name}: {e.Message}"; }
     }
 
+}
+
+/// <summary>
+/// The Bluetooth audio driver's one-shot connect and disconnect (KSPROPSETID_BtAudio), sent straight to the driver:
+/// the earbuds' kernel streaming audio interfaces are found with SetupAPI by their Bluetooth address, opened as files,
+/// and the property goes in with DeviceIoControl(IOCTL_KS_PROPERTY). This is what IKsControl does underneath, without
+/// any COM object, so nothing can fail with "Specified cast is not valid" (which stopped every request on the owner's
+/// PC in 1.4.3 and 1.4.4, for both the Galaxy Buds and the AirPods).
+/// </summary>
+static class KsDirect
+{
+    private static readonly Guid KsCategoryAudio = new("6994AD04-93EF-11D0-A3CC-00A0C9223196");
+    private static readonly Guid BtAudioSet = new("7FA06C40-B8F6-4C7E-8556-E8C33A12E54D");
+    private const uint IoctlKsProperty = 0x002F0003; // CTL_CODE(FILE_DEVICE_KS, 0, METHOD_NEITHER, FILE_ANY_ACCESS)
+    private const int DigcfPresent = 0x2, DigcfDeviceInterface = 0x10;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct SpDeviceInterfaceData { public int cbSize; public Guid InterfaceClassGuid; public int Flags; public IntPtr Reserved; }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct KsProperty { public Guid Set; public uint Id; public uint Flags; }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct SpDevinfoData { public int cbSize; public Guid ClassGuid; public int DevInst; public IntPtr Reserved; }
+
+    [DllImport("setupapi.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern bool SetupDiGetDeviceRegistryPropertyW(IntPtr set, ref SpDevinfoData devInfo, int property, out int regType, byte[]? buffer, int size, out int required);
+    [DllImport("setupapi.dll", SetLastError = true)]
+    private static extern IntPtr SetupDiGetClassDevsW(ref Guid classGuid, IntPtr enumerator, IntPtr parent, int flags);
+    [DllImport("setupapi.dll", SetLastError = true)]
+    private static extern bool SetupDiEnumDeviceInterfaces(IntPtr set, IntPtr devInfo, ref Guid classGuid, int index, ref SpDeviceInterfaceData data);
+    [DllImport("setupapi.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern bool SetupDiGetDeviceInterfaceDetailW(IntPtr set, ref SpDeviceInterfaceData data, IntPtr detail, int size, out int required, ref SpDevinfoData devInfo);
+    [DllImport("setupapi.dll")]
+    private static extern bool SetupDiDestroyDeviceInfoList(IntPtr set);
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern Microsoft.Win32.SafeHandles.SafeFileHandle CreateFileW(string name, uint access, uint share, IntPtr sa, uint disposition, uint flags, IntPtr template);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool DeviceIoControl(Microsoft.Win32.SafeHandles.SafeFileHandle h, uint code, ref KsProperty inBuf, int inSize, IntPtr outBuf, int outSize, out int returned, IntPtr overlapped);
+
+    private static string Prop(IntPtr set, ref SpDevinfoData dev, int property)
+    {
+        SetupDiGetDeviceRegistryPropertyW(set, ref dev, property, out _, null, 0, out int need);
+        if (need <= 0) return "";
+        var b = new byte[need];
+        return SetupDiGetDeviceRegistryPropertyW(set, ref dev, property, out _, b, need, out _) ? System.Text.Encoding.Unicode.GetString(b).TrimEnd('\0') : "";
+    }
+
+    /// <summary>Every present Bluetooth audio driver interface of the earbuds: by their address in the path (music) or
+    /// their name in the device's name (hands-free, whose path has no address).</summary>
+    public static List<string> Interfaces(string? address12, string nameFilter, bool any = false)
+    {
+        var list = new List<string>();
+        var g = KsCategoryAudio;
+        var set = SetupDiGetClassDevsW(ref g, IntPtr.Zero, IntPtr.Zero, DigcfPresent | DigcfDeviceInterface);
+        if (set == new IntPtr(-1)) return list;
+        try
+        {
+            for (int i = 0; ; i++)
+            {
+                var d = new SpDeviceInterfaceData { cbSize = Marshal.SizeOf<SpDeviceInterfaceData>() };
+                if (!SetupDiEnumDeviceInterfaces(set, IntPtr.Zero, ref g, i, ref d)) break;
+                var info = new SpDevinfoData { cbSize = Marshal.SizeOf<SpDevinfoData>() };
+                SetupDiGetDeviceInterfaceDetailW(set, ref d, IntPtr.Zero, 0, out int need, ref info);
+                if (need <= 0) continue;
+                var buf = Marshal.AllocHGlobal(need);
+                try
+                {
+                    Marshal.WriteInt32(buf, IntPtr.Size == 8 ? 8 : 6); // cbSize of SP_DEVICE_INTERFACE_DETAIL_DATA_W
+                    if (!SetupDiGetDeviceInterfaceDetailW(set, ref d, buf, need, out _, ref info)) continue;
+                    var path = Marshal.PtrToStringUni(buf + 4) ?? "";
+                    if (any) { list.Add($"{path} [{Prop(set, ref info, 0x0C)}]"); continue; }
+                    if (!path.Contains("bth", StringComparison.OrdinalIgnoreCase)) continue; // Bluetooth audio only
+                    bool byAddress = address12 != null && path.Contains(address12, StringComparison.OrdinalIgnoreCase);
+                    bool byName = false;
+                    if (!byAddress)
+                    {
+                        // SPDRP_FRIENDLYNAME (0x0C), else SPDRP_DEVICEDESC (0)
+                        var name = Prop(set, ref info, 0x0C);
+                        if (name.Length == 0) name = Prop(set, ref info, 0);
+                        byName = name.Contains(nameFilter, StringComparison.OrdinalIgnoreCase);
+                    }
+                    if ((byAddress || byName) && !list.Contains(path)) list.Add(path);
+                }
+                finally { Marshal.FreeHGlobal(buf); }
+            }
+        }
+        finally { SetupDiDestroyDeviceInfoList(set); }
+        return list;
+    }
+
+    /// <summary>Sends the one-shot property to one interface; 0 when the driver took it, else the Win32 error.</summary>
+    public static int Send(string path, uint id)
+    {
+        // Read and write access first; the property is FILE_ANY_ACCESS, so a handle without access also works.
+        foreach (uint access in new uint[] { 0xC0000000, 0x80000000, 0 })
+        {
+            using var h = CreateFileW(path, access, 3, IntPtr.Zero, 3, 0x80, IntPtr.Zero);
+            if (h.IsInvalid) { int e = Marshal.GetLastWin32Error(); if (access == 0) return e; continue; }
+            var prop = new KsProperty { Set = BtAudioSet, Id = id, Flags = 1 };
+            if (DeviceIoControl(h, IoctlKsProperty, ref prop, Marshal.SizeOf<KsProperty>(), IntPtr.Zero, 0, out _, IntPtr.Zero)) return 0;
+            return Marshal.GetLastWin32Error();
+        }
+        return -1;
+    }
+}
+
+/// <summary>The Bluetooth address of a paired device whose name contains the filter, as 12 hex digits (cached 5 min).</summary>
+static class BtAddress
+{
+    private static readonly Dictionary<string, (string Address, DateTime At)> cache = new();
+
+    public static string? Of(string filter)
+    {
+        lock (cache)
+            if (cache.TryGetValue(filter, out var c) && (DateTime.UtcNow - c.At).TotalMinutes < 5) return c.Address;
+        try
+        {
+            var all = Windows.Devices.Enumeration.DeviceInformation.FindAllAsync(
+                Windows.Devices.Bluetooth.BluetoothDevice.GetDeviceSelectorFromPairingState(true)).AsTask().GetAwaiter().GetResult();
+            foreach (var d in all)
+            {
+                if (!d.Name.Contains(filter, StringComparison.OrdinalIgnoreCase)) continue;
+                using var dev = Windows.Devices.Bluetooth.BluetoothDevice.FromIdAsync(d.Id).AsTask().GetAwaiter().GetResult();
+                if (dev == null) continue;
+                var a = dev.BluetoothAddress.ToString("x12");
+                lock (cache) cache[filter] = (a, DateTime.UtcNow);
+                return a;
+            }
+        }
+        catch (Exception e) { Log.Write($"bt: could not read the paired devices ({e.Message.Trim()})"); }
+        return null;
+    }
 }

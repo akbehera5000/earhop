@@ -13,7 +13,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>EarHop.Win</RootNamespace>
     <AssemblyName>EarHop</AssemblyName>
-    <Version>1.4.4</Version>
+    <Version>1.4.5</Version>
     <Product>EarHop</Product>
     <ApplicationIcon>EarHop.ico</ApplicationIcon>
     <ApplicationManifest>app.manifest</ApplicationManifest>

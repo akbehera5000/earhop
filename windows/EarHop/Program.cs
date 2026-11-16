@@ -53,6 +53,13 @@ static class Program
         using (var en = new NAudio.CoreAudioApi.MMDeviceEnumerator())
             foreach (var d in en.EnumerateAudioEndPoints(NAudio.CoreAudioApi.DataFlow.All, NAudio.CoreAudioApi.DeviceState.All))
                 try { ids.Add((d.FriendlyName, d.ID)); } catch { }
+        foreach (var path in KsDirect.Interfaces(null, "", any: true)) Log.Write($"kstest interface: {path}");
+        foreach (var path in KsDirect.Interfaces(null, "High Definition")) Log.Write($"kstest bluetooth match: {path}");
+        foreach (var path in KsDirect.Interfaces(null, "", any: true).Take(2))
+        {
+            var p = path[..path.LastIndexOf(" [")];
+            Log.Write($"kstest ioctl on {p[^14..]}: result {KsDirect.Send(p, 99)} (a non-Bluetooth driver should refuse; no crash)");
+        }
         foreach (var apt in new[] { ApartmentState.MTA, ApartmentState.STA })
         {
             var t = new Thread(() => { foreach (var (n, id) in ids) Log.Write($"kstest {apt}: {n}: {Ks.Probe(id)}"); });

@@ -205,6 +205,20 @@ foreach (var c in Enumerable.Reverse(chunks)) if (asm.Add(c, "x", DateTime.UtcNo
 Check("chunks: split and reassembled in any order", chunks.Count == (bigFrame.Length + 171) / 172 && chunks.All(c => c.Length <= 180) && assembled != null && assembled.SequenceEqual(bigFrame));
 Check("chunks: a 17 KB text fits Bluetooth", ClipRoute.Plan("text", 17073, "both", new[] { "mac" }, new[] { "mac" }, new[] { "mac" }).Ble.Contains("mac"));
 
+// AirPods proximity beacon, the same checks as the Mac.
+static byte[] Bcn(byte status) => new byte[] { 0x4C, 0x00, 0x07, 0x19, 0x01, 0x24, 0x20, status, 0x9A, 0x8F, 0x10, 0x00, 0x04 };
+Check("beacon both", Beacon.Parse(Bcn(0x0B))?.Ear == Ear.Both);
+Check("beacon one", Beacon.Parse(Bcn(0x03))?.Ear == Ear.One);
+Check("beacon none", Beacon.Parse(Bcn(0x01))?.Ear == Ear.None);
+Check("beacon model", Beacon.Parse(Bcn(0x0B))?.Model == 0x2024);
+Check("beacon case level", Beacon.Parse(new byte[] { 0x4C, 0x00, 0x07, 0x19, 0x01, 0x24, 0x20, 0x0B, 0x9A, 0x85, 0x10, 0x00, 0x04 })?.CaseLevel == 5);
+Check("beacon case unknown", Beacon.Parse(Bcn(0x0B))?.CaseLevel == null);
+Check("beacon battery", Beacon.Parse(Bcn(0x0B)) is { BudA: 9, BudB: 10 });
+Check("beacon rejects short", Beacon.Parse(new byte[] { 0x4C, 0x00, 0x07 }) == null);
+Check("weaker pair nearby is ignored", Beacon.Pick(new[] { (2, -45.0), (0, -70.0) }) == 2);
+Check("own second address still counts", Beacon.Pick(new[] { (2, -45.0), (1, -50.0) }) == 1);
+Check("no sources gives no reading", Beacon.Pick(Array.Empty<(int, double)>()) == null);
+
 HandoffSim.RunAll(Check);
 HandoffSim.DefaultConnect = 7; HandoffSim.DefaultDisconnect = 1.5;
 HandoffSim.RunAll((n, ok) => Check("real timing: " + n, ok));

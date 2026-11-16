@@ -11,7 +11,7 @@ Copy on your phone, paste on your PC. Send a photo from your Mac to your Android
 **Free, open source, no cloud, no account.**
 
 [![Download for Mac](https://img.shields.io/badge/Download-Mac-9466FF?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/akbehera5000/earhop/releases/latest/download/EarHop-Mac-1.4.1.dmg)
-[![Download for Windows](https://img.shields.io/badge/Download-Windows-4D9EFF?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/akbehera5000/earhop/releases/latest/download/EarHop-Windows-Setup-1.4.4.exe)
+[![Download for Windows](https://img.shields.io/badge/Download-Windows-4D9EFF?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/akbehera5000/earhop/releases/latest/download/EarHop-Windows-Setup-1.4.5.exe)
 [![Download for Android](https://img.shields.io/badge/Download-Android-30D158?style=for-the-badge&logo=android&logoColor=white)](https://github.com/akbehera5000/earhop/releases/latest/download/EarHop-Android-1.4.1.apk)
 
 [![Latest release](https://img.shields.io/github/v/release/akbehera5000/earhop?label=latest&color=9466FF)](https://github.com/akbehera5000/earhop/releases/latest)
@@ -181,7 +181,7 @@ All tests at once: `bash tests/run.sh`.
 
 ## Windows
 
-**EarHop-Windows-Setup-1.4.4.exe** from the [latest release](https://github.com/akbehera5000/earhop/releases/latest)
+**EarHop-Windows-Setup-1.4.5.exe** from the [latest release](https://github.com/akbehera5000/earhop/releases/latest)
 installs EarHop for your Windows account (no administrator rights, no .NET needed) in
 `%LOCALAPPDATA%\Programs\EarHop`, with a Start menu entry, an entry in Settings, Apps, Installed apps (Uninstall) and
 start at sign-in. Running a newer setup updates it and keeps your settings.

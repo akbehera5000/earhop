@@ -1,5 +1,19 @@
 # Changelog
 
+## 2026-11-15: Windows 1.4.5, connect and release straight to the driver, AirPods ear detection
+
+* Fixed: on the owner's PC every connect and release still failed with "Specified cast is not valid" (Galaxy Buds2 Pro
+  and AirPods Pro), so the PC only got the earbuds through Bluetooth settings, the Buds channel fallback (16 s) or the
+  earbuds moving by themselves, and a release never let go ("0 profiles asked"). The one-shot connect and disconnect
+  now go straight to the Bluetooth audio driver: the earbuds' audio interfaces are found with SetupAPI (by Bluetooth
+  address, or by name for the hands-free one) and the property is sent with DeviceIoControl(IOCTL_KS_PROPERTY), with
+  no COM object. Tried in Parallels: the enumeration finds the drivers and a non-Bluetooth driver answers
+  ERROR_SET_NOT_FOUND, as it should. The old COM route stays only as a fallback when no interface is found.
+* Windows: AirPods ear detection and battery from their proximity beacon (port of Beacon.swift with its tests: Pro
+  models, -75 dBm floor, strongest pair within 8 dB, fresh for 4 s). Taking an AirPod out now pauses on the PC, and the
+  Earbuds page shows the ear state.
+* Self test: 180 checks.
+
 ## 2026-11-15: Windows installer (EarHop-Setup-1.4.4.exe)
 
 * Windows: EarHop installs itself. Named EarHop-Setup-x.y.z.exe, the exe shows a Fluent setup window and installs per

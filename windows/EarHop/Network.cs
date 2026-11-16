@@ -27,6 +27,69 @@ sealed class BleWatch : IDisposable
         lock (addresses) return addresses.TryGetValue(dev, out var a) && (DateTime.UtcNow - a.At).TotalSeconds < 90 ? a.Address : null;
     }
 
+    // MARK: AirPods proximity beacon (EarMonitor.swift): ear state and battery while you wear them
+
+    private sealed class Source { public int Count; public double Rssi; public DateTime At; public int? BudA, BudB, Case; public DateTime CaseAt; }
+    private readonly Dictionary<ulong, Source> sources = new();
+    private string lastEarLog = "";
+    public const int MinRssi = -75;
+
+    private void AirPods(Windows.Storage.Streams.IBuffer data, ulong address, short rssi)
+    {
+        if (rssi < MinRssi || rssi == 127) return;
+        var raw = new byte[data.Length];
+        Windows.Storage.Streams.DataReader.FromBuffer(data).ReadBytes(raw);
+        var md = new byte[raw.Length + 2];
+        md[0] = 0x4C; md[1] = 0x00;
+        raw.CopyTo(md, 2);
+        if (Beacon.Parse(md) is not Beacon b || !Beacon.Models.Contains(b.Model)) return;
+        int count = b.Ear == Ear.Both ? 2 : b.Ear == Ear.One ? 1 : 0;
+        var now = DateTime.UtcNow;
+        lock (sources)
+        {
+            if (!sources.TryGetValue(address, out var src)) sources[address] = src = new Source { Rssi = rssi };
+            src.Count = count;
+            src.Rssi = src.Rssi * 0.7 + rssi * 0.3; // smoothed, so one weak packet does not move it
+            src.At = now;
+            src.BudA = b.BudA; src.BudB = b.BudB;
+            if (b.CaseLevel is int c) { src.Case = c; src.CaseAt = now; }
+            foreach (var k in sources.Where(kv => (now - kv.Value.At).TotalSeconds >= 30).Select(kv => kv.Key).ToList()) sources.Remove(k);
+        }
+        var e = AirPodsEar;
+        var key = EarText.Raw(e);
+        if (key != lastEarLog) { lastEarLog = key; Log.Write($"ear: AirPods {key} (rssi {rssi})"); }
+    }
+
+    /// <summary>In-ear state of your AirPods from their beacon. Windows hears fewer packets than the Mac, so a reading
+    /// stays fresh for 4 s (the Mac uses 2.5 s); with nothing fresh it is unknown, which never pauses.</summary>
+    public Ear AirPodsEar
+    {
+        get
+        {
+            var now = DateTime.UtcNow;
+            List<(int, double)> fresh;
+            lock (sources) fresh = sources.Values.Where(s => (now - s.At).TotalSeconds < 4).Select(s => (s.Count, s.Rssi)).ToList();
+            return Beacon.Pick(fresh) switch { 2 => Ear.Both, 1 => Ear.One, 0 => Ear.None, _ => Ear.Unknown };
+        }
+    }
+
+    public EarReading AirPodsReading => AirPodsEar is var e && e != Ear.Unknown ? new EarReading(e, "airpods-beacon", EarConfidence.High) : EarReading.Unknown;
+
+    /// <summary>AirPods battery as text, from the strongest recent beacon (your own AirPods).</summary>
+    public string? AirPodsBattery
+    {
+        get
+        {
+            var now = DateTime.UtcNow;
+            Source? s;
+            lock (sources) s = sources.Values.Where(x => (now - x.At).TotalSeconds < 10).OrderByDescending(x => x.Rssi).FirstOrDefault();
+            if (s?.BudA is not int a || s.BudB is not int b) return null;
+            var t = $"Earbuds {a * 10}% and {b * 10}%";
+            if (s.Case is int c && (now - s.CaseAt).TotalSeconds < 60) t += $", case {c * 10}%";
+            return t;
+        }
+    }
+
     public BleWatch(string secret, string selfName) { this.secret = secret; this.selfName = selfName; }
 
     public void Start()
@@ -37,6 +100,8 @@ sealed class BleWatch : IDisposable
             watcher.Received += (_, e) =>
             {
                 foreach (var g in e.Advertisement.ServiceUuids) Handle(g, e.BluetoothAddress);
+                foreach (var m in e.Advertisement.ManufacturerData)
+                    if (m.CompanyId == 0x004C) AirPods(m.Data, e.BluetoothAddress, e.RawSignalStrengthInDBm);
             };
             watcher.Stopped += (_, e) => Log.Write($"ble: scan stopped ({e.Error})");
             watcher.Start();

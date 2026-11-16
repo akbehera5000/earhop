@@ -308,6 +308,7 @@ sealed class SettingsWindow : Window
         Add(Kit.Row("\uE702", "Paired with this PC", "Pair them once in Windows Bluetooth settings. EarHop then connects and releases them by itself.", known));
         Add(Kit.Row("\uE7F6", "Connected here", null, conn));
         if (cfg.IsBuds) Add(Kit.Row("\uE9E9", "Buds controls channel", "Battery, which bud is in an ear, noise control and equalizer, while the Buds are connected here.", chan));
+        else Add(Kit.Row("\uE9E9", "Ear detection", "Read from the AirPods' own Bluetooth signal, like on the Mac. Needs Bluetooth on and the AirPods nearby.", chan));
         var bt = Kit.Button("Bluetooth settings", () => Open("ms-settings:bluetooth"));
         bt.HorizontalAlignment = WpfHA.Left;
         bt.Margin = new Thickness(0, 8, 0, 0);
@@ -331,7 +332,7 @@ sealed class SettingsWindow : Window
             Add(controlsPanel);
         }
         Head("When an earbud comes out");
-        Add(Kit.Row("\uE769", "Pause when an earbud comes out", "Galaxy Buds: read from the Buds' controls channel while they are connected here. Play resumes when it goes back in within the time below.",
+        Add(Kit.Row("\uE769", "Pause when an earbud comes out", "Galaxy Buds: from the Buds' controls channel while they are connected here. AirPods: from their Bluetooth signal. Play resumes when it goes back in within the time below.",
             Kit.Toggle(cfg.PauseWhenOneOut, v => app.Update(c => c.PauseWhenOneOut = v))));
         var resume = Kit.Segmented(new[] { "Never", "30 s", "2 min", "5 min" }, cfg.ResumeWithinSeconds switch { <= 0 => 0, <= 30 => 1, <= 120 => 2, _ => 3 },
             i => app.Update(c => c.ResumeWithinSeconds = i switch { 0 => 0, 1 => 30, 2 => 120, _ => 300 }));
@@ -343,7 +344,13 @@ sealed class SettingsWindow : Window
             conn.Content = StatusText(c ? "Connected" : "Not connected", c);
             var bs = app.Buds.State;
             bool open = app.Buds.Open;
-            chan.Content = StatusText(open ? (bs.Wearing == 2 ? "Open, both in" : bs.Wearing == 1 ? "Open, one in" : "Open, out of ears") : c ? "Opening" : "Closed", open);
+            if (app.Cfg.IsBuds)
+                chan.Content = StatusText(open ? (bs.Wearing == 2 ? "Open, both in" : bs.Wearing == 1 ? "Open, one in" : "Open, out of ears") : c ? "Opening" : "Closed", open);
+            else
+            {
+                var r = app.Reading;
+                chan.Content = StatusText(r.Ear switch { Ear.Both => "Both in", Ear.One => "One in", Ear.None => "Out of ears", _ => "Not heard" }, r.Ear != Ear.Unknown);
+            }
             batt.Text = app.LastBattery is string b ? b : "Battery shows while the earbuds are connected to one of your devices.";
             controlsPanel.IsEnabled = open;
             controlsPanel.Opacity = open ? 1 : 0.45;

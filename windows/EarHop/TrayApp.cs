@@ -60,7 +60,8 @@ sealed class TrayApp : ApplicationContext
     public BudsLink Buds => buds;
     public EarReading Reading => reading;
     /// <summary>Battery text: from this PC's own Buds channel when it is open, else from the device that holds them.</summary>
-    public string? LastBattery => buds.Open && buds.State.BattL >= 0 ? BattText(buds.State) : peerBattery;
+    public string? LastBattery => cfg.IsBuds && buds.Open && buds.State.BattL >= 0 ? BattText(buds.State)
+                                  : !cfg.IsBuds && ble.AirPodsBattery is string ab ? ab : peerBattery;
     public static string BattText(BudsProtocol.State s)
     {
         string P(string l, int v, bool ch) => v >= 0 ? $"{l} {v}%{(ch ? " charging" : "")}" : "";
@@ -211,7 +212,7 @@ sealed class TrayApp : ApplicationContext
         if ((now - autoCheckedAt).TotalSeconds >= 2) { autoCheckedAt = now; AutoEarbuds(); }
         bool attention = Native.IdleSeconds() < 30;
         if (cfg.Secret.Length == 0) return;
-        reading = cfg.IsBuds ? buds.Reading : EarReading.Unknown;
+        reading = cfg.IsBuds ? buds.Reading : ble.AirPodsReading;
         controller.Tick(audio.Playing, reading, owner, audio.InCall, attention);
         if (ticks % 2 == 0) clip.Tick();
 
